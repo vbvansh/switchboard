@@ -9,6 +9,7 @@ needed, add an explicit allowlist rather than loosening this check.
 
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.parse import urlparse
 
 from pydantic import field_validator
@@ -45,6 +46,18 @@ class Settings(BaseSettings):
     # system RAM and can take well over a minute before the first token.
     connect_timeout: float = 10.0
     read_timeout: float = 600.0
+
+    # --- Ledger -------------------------------------------------------------
+    database_url: str = "sqlite:///data/switchboard.db"
+
+    # Store the full `messages` array of every request. Needed as training data
+    # for the milestone 4 router, but it means the database holds whatever
+    # users typed. The database file is gitignored. Turn this off to keep only
+    # token counts and costs.
+    store_prompts: bool = True
+
+    # Simulated price table. Lives in git so price changes appear in a diff.
+    prices_file: str = str(Path(__file__).parent / "prices.json")
 
     @field_validator("ollama_base_url")
     @classmethod

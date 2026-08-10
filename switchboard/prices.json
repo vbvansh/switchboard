@@ -1,0 +1,58 @@
+{
+  "_README": [
+    "SIMULATED pricing. Every model here runs locally on Ollama and costs $0.00 in",
+    "reality. Each local model is assigned the price tag of a commercial model of",
+    "roughly comparable capability, so that budget accounting and 'money saved'",
+    "figures are meaningful and comparable to what a real company would see.",
+    "",
+    "These are ROUND, ILLUSTRATIVE numbers chosen to represent price tiers - they",
+    "are not scraped from any provider's live price list and will drift from real",
+    "prices over time. Edit them freely; because this file is in git, any change",
+    "shows up in a diff and historical results stay explainable.",
+    "",
+    "Units: US dollars per 1,000,000 tokens."
+  ],
+
+  "baseline_model": "qwen2.5:7b",
+  "_baseline_note": "The model a naive 'give everyone the best' company would use. Every request records what it WOULD have cost here; that difference is the savings figure.",
+
+  "default": {
+    "tier": "unknown",
+    "stands_in_for": "unrecognised model - priced at mid tier so cost is never silently zero",
+    "input_per_mtok": 1.0,
+    "output_per_mtok": 5.0
+  },
+
+  "models": {
+    "qwen2.5:1.5b": {
+      "tier": "T0",
+      "stands_in_for": "budget/nano commercial tier",
+      "input_per_mtok": 0.10,
+      "output_per_mtok": 0.40
+    },
+    "stable-code:3b-code-q4_0": {
+      "tier": "T0-code",
+      "stands_in_for": "small code-completion model",
+      "input_per_mtok": 0.15,
+      "output_per_mtok": 0.60
+    },
+    "qwen2.5:3b": {
+      "tier": "T1",
+      "stands_in_for": "small general-purpose commercial tier",
+      "input_per_mtok": 0.25,
+      "output_per_mtok": 1.25
+    },
+    "qwen3:4b": {
+      "tier": "T2",
+      "stands_in_for": "mid reasoning tier - output priced high because thinking tokens inflate completion length",
+      "input_per_mtok": 1.00,
+      "output_per_mtok": 5.00
+    },
+    "qwen2.5:7b": {
+      "tier": "T3",
+      "stands_in_for": "frontier tier",
+      "input_per_mtok": 3.00,
+      "output_per_mtok": 15.00
+    }
+  }
+}

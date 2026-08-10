@@ -10,12 +10,16 @@ inference request leaves the machine.** That is enforced by a startup check
 
 ## Status
 
-Milestone 1 of 6 — an OpenAI-compatible proxy that forwards to a single fixed
-model. **Routing is not implemented yet.** What works today:
+Milestone 2 of 6 — a metered OpenAI-compatible proxy. **Routing is not
+implemented yet**; every request still goes to one fixed model. What works
+today:
 
 - `POST /v1/chat/completions`, streaming and non-streaming
-- `GET /v1/models`, `GET /health`
 - Drop-in compatibility with any OpenAI client via `base_url`
+- Per-developer API keys (`401` on a bad key)
+- Monthly budgets, enforced (`402` when exhausted)
+- Every request logged: who, which model, tokens, simulated cost, latency
+- Admin CLI for users, budgets, and usage reports
 - Local-provider enforcement
 
 ## Why this exists
@@ -54,10 +58,16 @@ pip freeze > requirements.lock.txt
 copy .env.example .env
 ```
 
-Ollama must be running. Confirm it and see the available tiers:
+Ollama must be running. Confirm it and see the available tiers with prices:
 
 ```powershell
 python -m switchboard check
+```
+
+Create a developer. The API key is shown **once** — only its hash is stored.
+
+```powershell
+python -m switchboard users add alice --budget 50
 ```
 
 ## Run
@@ -66,12 +76,15 @@ python -m switchboard check
 python -m switchboard serve
 ```
 
-Point any OpenAI client at it — the only change is `base_url`:
+Point any OpenAI client at it — the only changes are `base_url` and the key:
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="not-needed")
+client = OpenAI(
+    base_url="http://127.0.0.1:8000/v1",
+    api_key="sk-swbd-...",             # the key printed by `users add`
+)
 
 response = client.chat.completions.create(
     model="auto",                      # hands model choice to Switchboard
@@ -81,8 +94,40 @@ print(response.choices[0].message.content)
 ```
 
 `model="auto"` is the routing seam. Today it resolves to `default_model`; from
-milestone 3 it triggers a real routing decision. An explicit model name is
+milestone 4 it triggers a real routing decision. An explicit model name is
 always honoured, which is what makes per-tier benchmarking possible.
+
+## Admin
+
+```powershell
+python -m switchboard usage                      # spend and savings this month
+python -m switchboard users list
+python -m switchboard users budget alice 100     # change a limit
+python -m switchboard users deactivate alice     # block without deleting history
+```
+
+## Money is simulated
+
+Local inference costs nothing, so budgets would be meaningless. Each local model
+is assigned the price tag of a commercial model of comparable capability, in
+[`switchboard/prices.json`](switchboard/prices.json) — a file rather than a
+database table, so price changes appear in a git diff and historical results
+stay explainable.
+
+Every request also records what it **would** have cost on the top tier
+(`qwen2.5:7b`). That difference is the savings figure, stored per row rather
+than reconstructed later.
+
+Real measured cost — latency, token counts, model switches — is recorded
+separately and never mixed with the simulated dollars.
+
+## Privacy
+
+`store_prompts` defaults to **on**: the full `messages` array of every request
+is written to the database, because milestone 4's router needs real examples to
+learn from. That means the database holds whatever users typed. It is excluded
+from git. Set `SWITCHBOARD_STORE_PROMPTS=false` to keep only token counts and
+costs.
 
 ## Tests
 
@@ -97,8 +142,8 @@ pytest
 | # | Milestone | Status |
 |---|-----------|--------|
 | 1 | OpenAI-compatible proxy | done |
-| 2 | Ledger: users, budgets, simulated cost accounting | next |
-| 3 | Baseline strategies + live eval harness (first real numbers) | |
+| 2 | Ledger: users, budgets, simulated cost accounting | done |
+| 3 | Baseline strategies + live eval harness (first real numbers) | next |
 | 4 | Embedding classifier and cascade routing | |
 | 5 | Guardrails, with honest false-positive-rate reporting | |
 | 6 | Offline replay, Pareto plots, dashboard, writeup | |
