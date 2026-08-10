@@ -1,0 +1,20 @@
+# Normalise line endings so the repo is identical regardless of who clones it.
+# Without this, Git guesses per-file and prints "LF will be replaced by CRLF"
+# warnings on Windows. Text files are stored as LF in the repository and
+# checked out with the platform's native ending.
+* text=auto
+
+# Always LF, even on Windows - these break if given CRLF.
+*.sh   text eol=lf
+*.py   text eol=lf
+
+# Always CRLF - Windows-native scripts.
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Binary: never touch these.
+*.png  binary
+*.jpg  binary
+*.db   binary
+*.parquet binary

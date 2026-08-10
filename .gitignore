@@ -1,0 +1,46 @@
+# --- Environments & secrets -------------------------------------------------
+.venv/
+venv/
+env/
+# The venv actually in use on this machine (~0.7 GB, 25k files).
+# NOTE: trailing comments are NOT supported in .gitignore - a comment on the
+# same line becomes part of the pattern and silently matches nothing.
+.switchboard/
+.env
+.env.*
+!.env.example
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Local data: never commit these -----------------------------------------
+# The ledger holds per-user request logs and prompt text. Treat as sensitive.
+*.db
+*.sqlite
+*.sqlite3
+data/
+!data/.gitkeep
+
+# --- Evaluation artifacts ---------------------------------------------------
+# Raw run outputs are large and regenerable. Commit the summarised results
+# (CSV/JSON metrics + charts) under results/ instead.
+runs/
+cache/
+.hf_cache/
+*.parquet
+
+# --- Editors / OS -----------------------------------------------------------
+.vscode/*
+!.vscode/settings.json
+.idea/
+Thumbs.db
+desktop.ini

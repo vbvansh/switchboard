@@ -1,0 +1,27 @@
+[project]
+name = "switchboard"
+version = "0.1.0"
+description = "A local-only AI model router: complexity-aware routing, budget enforcement, and guardrails over Ollama."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer's whole API is function calls in argument defaults; B008 is wrong here.
+"switchboard/__main__.py" = ["B008"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
