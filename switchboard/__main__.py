@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import typer
 import uvicorn
 from rich.console import Console
@@ -13,7 +15,9 @@ from switchboard.pricing import PriceTable
 
 cli = typer.Typer(add_completion=False, help="Switchboard - local AI model router.")
 users_cli = typer.Typer(help="Manage developers and their budgets.")
+eval_cli = typer.Typer(help="Measure routing strategies against known answers.")
 cli.add_typer(users_cli, name="users")
+cli.add_typer(eval_cli, name="eval")
 
 console = Console()
 
@@ -192,6 +196,197 @@ def usage() -> None:
         f"{PriceTable.load(settings.prices_file).baseline_model}. "
         "No real money is involved.[/dim]"
     )
+
+
+# --- Evaluation ------------------------------------------------------------
+
+
+@eval_cli.command("tasks")
+def eval_tasks(
+    taskset: str = typer.Option("builtin", help="Task set name."),
+) -> None:
+    """Show what is in a task set."""
+    from eval.datasets import load_taskset
+
+    tasks = load_taskset(taskset)
+    counts = tasks.counts_by_difficulty()
+    console.print(f"[bold]{tasks.name}[/bold] - {len(tasks)} tasks")
+    console.print(
+        "  " + "  ".join(f"{level}: {n}" for level, n in counts.items())
+    )
+    categories = sorted({t.category for t in tasks})
+    console.print(f"  categories: {', '.join(categories)}")
+
+
+@eval_cli.command("run")
+def eval_run(
+    taskset: str = typer.Option("builtin", help="Task set name."),
+    strategies: str = typer.Option(
+        "always-cheap,always-expensive,random,keyword",
+        help="Comma-separated strategy names.",
+    ),
+    limit: int = typer.Option(0, help="Only run the first N tasks (0 = all)."),
+    difficulty: str = typer.Option("", help="Only run one difficulty level."),
+    max_tokens: int = typer.Option(600, help="Cap on generated tokens per task."),
+    out: str = typer.Option("runs/latest.jsonl", help="Where to stream results."),
+) -> None:
+    """Run task sets through strategies and record every outcome.
+
+    Slow by design on this hardware - the top tier does not fit in VRAM. Results
+    stream to disk as they complete, so an interrupted run is not lost.
+    """
+    import asyncio
+
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        TaskProgressColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
+
+    from eval.datasets import load_taskset
+    from eval.report import summarise, to_markdown
+    from eval.runner import EvalRunner
+    from switchboard.routing import build_strategy
+
+    prices = PriceTable.load(settings.prices_file)
+    names = [n.strip() for n in strategies.split(",") if n.strip()]
+
+    try:
+        chosen = [build_strategy(name, prices) for name in names]
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    tasks = load_taskset(taskset).filtered(
+        difficulty=difficulty or None, limit=limit or None
+    )
+    if not len(tasks):
+        console.print("[red]No tasks matched those filters.[/red]")
+        raise typer.Exit(code=1)
+
+    total = len(tasks) * len(chosen)
+    console.print(
+        f"Running [cyan]{len(tasks)}[/cyan] tasks x "
+        f"[cyan]{len(chosen)}[/cyan] strategies = [bold]{total}[/bold] generations"
+    )
+    console.print(f"Ladder: {' -> '.join(prices.ladder)}\n")
+
+    runner = EvalRunner(settings, prices, max_tokens=max_tokens)
+    output = Path(out)
+
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        bar = progress.add_task("evaluating", total=total)
+
+        def tick(result) -> None:
+            mark = "[green]ok[/green]" if result.correct else "[red]x [/red]"
+            progress.update(
+                bar,
+                advance=1,
+                description=f"{mark} {result.strategy}/{result.task_id} "
+                f"[dim]{result.model}[/dim]",
+            )
+
+        try:
+            results, _ = asyncio.run(runner.run(tasks, chosen, output, progress=tick))
+        except KeyboardInterrupt:
+            console.print(f"\n[yellow]Interrupted. Partial results in {output}[/yellow]")
+            raise typer.Exit(code=130) from None
+
+    console.print(f"\n[green]Done.[/green] Raw results: {output}\n")
+    console.print(to_markdown(summarise(results)))
+    console.print(
+        f"\nRender the full report with: "
+        f"[cyan]switchboard eval report --run {output}[/cyan]"
+    )
+
+
+@eval_cli.command("report")
+def eval_report(
+    run: str = typer.Option("runs/latest.jsonl", help="Run file to summarise."),
+    out_dir: str = typer.Option("results", help="Where to write report artefacts."),
+    plot: bool = typer.Option(True, help="Also render the cost/accuracy chart."),
+) -> None:
+    """Summarise a run: comparison table, per-tier breakdown, and chart."""
+    from eval.report import pareto_plot, summarise, to_markdown
+    from eval.runner import load_results
+
+    run_path = Path(run)
+    if not run_path.exists():
+        console.print(f"[red]No run file at {run_path}[/red]")
+        raise typer.Exit(code=1)
+
+    results, metadata = load_results(run_path)
+    if not results:
+        console.print("[red]That run file contains no results.[/red]")
+        raise typer.Exit(code=1)
+
+    summaries = summarise(results)
+
+    table = Table(title="Strategy comparison (money SIMULATED)")
+    table.add_column("Strategy")
+    table.add_column("Accuracy", justify="right")
+    table.add_column("Cost", justify="right")
+    table.add_column("Saved", justify="right")
+    table.add_column("Avg latency", justify="right")
+    table.add_column("Switches", justify="right")
+    table.add_column("Format misses", justify="right")
+
+    for s in summaries:
+        table.add_row(
+            s.strategy,
+            f"{s.accuracy:.1f}% ({s.correct}/{s.tasks})",
+            f"${s.cost_usd:.4f}",
+            f"{s.saved_vs_baseline_pct:.1f}%",
+            f"{s.avg_latency_ms} ms",
+            str(s.model_switches),
+            str(s.format_failures),
+        )
+    console.print(table)
+
+    breakdown = Table(title="Accuracy by difficulty")
+    breakdown.add_column("Strategy")
+    for level in ("easy", "medium", "hard"):
+        breakdown.add_column(level, justify="right")
+    for s in summaries:
+        cells = []
+        for level in ("easy", "medium", "hard"):
+            correct, total = s.accuracy_by_difficulty.get(level, (0, 0))
+            cells.append(f"{correct}/{total}" if total else "-")
+        breakdown.add_row(s.strategy, *cells)
+    console.print(breakdown)
+
+    for s in summaries:
+        usage = ", ".join(
+            f"{model} x{count}" for model, count in sorted(s.model_usage.items())
+        )
+        console.print(f"[dim]{s.strategy}: {usage}[/dim]")
+
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    (out_path / "comparison.md").write_text(
+        to_markdown(summaries) + "\n", encoding="utf-8"
+    )
+    console.print(f"\nWrote [cyan]{out_path / 'comparison.md'}[/cyan]")
+
+    if plot:
+        chart = pareto_plot(summaries, out_path / "cost_vs_accuracy.png")
+        console.print(f"Wrote [cyan]{chart}[/cyan]")
+
+    if metadata:
+        console.print(
+            f"\n[dim]Run: {metadata.get('task_set')}, "
+            f"max_tokens={metadata.get('max_tokens')}, "
+            f"temperature={metadata.get('temperature')}, "
+            f"started {metadata.get('started_at')}[/dim]"
+        )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,67 @@
+{
+  "_README": [
+    "Built-in evaluation set: 40 tasks with mechanically-checkable answers.",
+    "",
+    "Ships in the repo so a run needs no download and is reproducible offline.",
+    "Difficulty is spread on purpose - if every task were easy, every strategy",
+    "would score the same and routing would look pointless; if every task were",
+    "hard, the cheap tiers would fail everything and routing would look",
+    "impossible. The spread is what makes the cost/accuracy trade-off visible.",
+    "",
+    "'difficulty' is the author's expectation, not ground truth. Milestone 4",
+    "compares it against which tier actually succeeded - where they disagree is",
+    "the interesting part.",
+    "",
+    "Answers were chosen to be unambiguous. If a task turns out to be",
+    "ambiguous, fix or delete it rather than tuning the grader around it."
+  ],
+
+  "name": "builtin",
+  "version": 1,
+  "tasks": [
+    {"id": "arith-01", "difficulty": "easy", "category": "arithmetic", "prompt": "What is 17 + 28?", "check": {"type": "numeric", "value": 45}},
+    {"id": "arith-02", "difficulty": "easy", "category": "arithmetic", "prompt": "What is 12 multiplied by 12?", "check": {"type": "numeric", "value": 144}},
+    {"id": "arith-03", "difficulty": "easy", "category": "arithmetic", "prompt": "What is 100 - 37?", "check": {"type": "numeric", "value": 63}},
+    {"id": "arith-04", "difficulty": "easy", "category": "arithmetic", "prompt": "What is 144 divided by 12?", "check": {"type": "numeric", "value": 12}},
+    {"id": "arith-05", "difficulty": "easy", "category": "arithmetic", "prompt": "What is 7 times 8?", "check": {"type": "numeric", "value": 56}},
+    {"id": "arith-06", "difficulty": "easy", "category": "arithmetic", "prompt": "What is 250 + 175?", "check": {"type": "numeric", "value": 425}},
+    {"id": "arith-07", "difficulty": "easy", "category": "arithmetic", "prompt": "What is 15 percent of 200?", "check": {"type": "numeric", "value": 30}},
+    {"id": "arith-08", "difficulty": "easy", "category": "arithmetic", "prompt": "What is 2 to the power of 10?", "check": {"type": "numeric", "value": 1024}},
+
+    {"id": "word-01", "difficulty": "medium", "category": "word-problem", "prompt": "A shop sells pens for 3 dollars each. How much do 7 pens cost in dollars?", "check": {"type": "numeric", "value": 21}},
+    {"id": "word-02", "difficulty": "medium", "category": "word-problem", "prompt": "A train travels 60 km in one hour at a constant speed. How many kilometres does it travel in 3.5 hours?", "check": {"type": "numeric", "value": 210}},
+    {"id": "word-03", "difficulty": "medium", "category": "word-problem", "prompt": "Sarah has 24 apples and gives away one third of them. How many apples does she have left?", "check": {"type": "numeric", "value": 16}},
+    {"id": "word-04", "difficulty": "medium", "category": "word-problem", "prompt": "A rectangle is 8 metres long and 5 metres wide. What is its area in square metres?", "check": {"type": "numeric", "value": 40}},
+    {"id": "word-05", "difficulty": "medium", "category": "word-problem", "prompt": "A book normally costs 20 dollars. It is on sale with a 25 percent discount. What is the sale price in dollars?", "check": {"type": "numeric", "value": 15}},
+    {"id": "word-06", "difficulty": "medium", "category": "word-problem", "prompt": "There are 5 boxes containing 12 items each. Then 8 items are removed in total. How many items remain?", "check": {"type": "numeric", "value": 52}},
+    {"id": "word-07", "difficulty": "medium", "category": "word-problem", "prompt": "A car uses 8 litres of fuel per 100 kilometres. How many litres does it use for a 250 kilometre journey?", "check": {"type": "numeric", "value": 20}},
+    {"id": "word-08", "difficulty": "medium", "category": "word-problem", "prompt": "Tom is 3 times as old as Ann. Ann is 7 years old. How old is Tom?", "check": {"type": "numeric", "value": 21}},
+
+    {"id": "multi-01", "difficulty": "hard", "category": "multi-step", "prompt": "A tank holds 500 litres. Water flows in at 25 litres per minute and drains out at 5 litres per minute at the same time. Starting from empty, how many minutes does it take to fill completely?", "check": {"type": "numeric", "value": 25}},
+    {"id": "multi-02", "difficulty": "hard", "category": "multi-step", "prompt": "Three friends split a bill of 180 dollars. One of them pays twice as much as each of the other two, who pay equal amounts. How many dollars does the person paying the most pay?", "check": {"type": "numeric", "value": 90}},
+    {"id": "multi-03", "difficulty": "hard", "category": "multi-step", "prompt": "A number is doubled, and then 6 is added to the result, giving 26. What was the original number?", "check": {"type": "numeric", "value": 10}},
+    {"id": "multi-04", "difficulty": "hard", "category": "multi-step", "prompt": "In a class of 30 students, 60 percent play football and 40 percent play tennis. 20 percent play both sports. How many students play neither sport?", "check": {"type": "numeric", "value": 6}},
+    {"id": "multi-05", "difficulty": "hard", "category": "multi-step", "prompt": "A shirt costs 40 dollars. Its price is first increased by 50 percent, then the new price is reduced by 20 percent. What is the final price in dollars?", "check": {"type": "numeric", "value": 48}},
+    {"id": "multi-06", "difficulty": "hard", "category": "multi-step", "prompt": "Two trains start 300 kilometres apart and travel toward each other, one at 60 km/h and the other at 90 km/h. After how many hours do they meet?", "check": {"type": "numeric", "value": 2}},
+    {"id": "multi-07", "difficulty": "hard", "category": "multi-step", "prompt": "What is the sum of all whole numbers from 1 to 100 inclusive?", "check": {"type": "numeric", "value": 5050}},
+    {"id": "multi-08", "difficulty": "hard", "category": "multi-step", "prompt": "A recipe for 4 people requires 300 grams of flour. How many grams of flour are needed for 10 people, keeping the same proportions?", "check": {"type": "numeric", "value": 750}},
+
+    {"id": "fact-01", "difficulty": "easy", "category": "factual", "prompt": "What is the capital city of Japan?", "check": {"type": "contains", "values": ["tokyo"]}},
+    {"id": "fact-02", "difficulty": "easy", "category": "factual", "prompt": "How many continents are there on Earth, by the most common convention?", "check": {"type": "numeric", "value": 7}},
+    {"id": "fact-03", "difficulty": "medium", "category": "factual", "prompt": "What is the chemical symbol for gold?", "check": {"type": "exact", "value": "Au"}},
+    {"id": "fact-04", "difficulty": "medium", "category": "factual", "prompt": "In which year did the Second World War end?", "check": {"type": "numeric", "value": 1945}},
+    {"id": "fact-05", "difficulty": "easy", "category": "factual", "prompt": "What is the largest planet in our solar system?", "check": {"type": "contains", "values": ["jupiter"]}},
+    {"id": "fact-06", "difficulty": "easy", "category": "factual", "prompt": "How many sides does a hexagon have?", "check": {"type": "numeric", "value": 6}},
+    {"id": "fact-07", "difficulty": "easy", "category": "factual", "prompt": "What is the freezing point of water in degrees Celsius?", "check": {"type": "numeric", "value": 0}},
+    {"id": "fact-08", "difficulty": "easy", "category": "factual", "prompt": "Who wrote the play Romeo and Juliet?", "check": {"type": "contains", "values": ["shakespeare"]}},
+
+    {"id": "code-01", "difficulty": "easy", "category": "code", "prompt": "In Python, what integer does len('hello') return?", "check": {"type": "numeric", "value": 5}},
+    {"id": "code-02", "difficulty": "easy", "category": "code", "prompt": "In Python, what is the result of 7 // 2?", "check": {"type": "numeric", "value": 3}},
+    {"id": "code-03", "difficulty": "easy", "category": "code", "prompt": "In Python, what does the expression [1, 2, 3][-1] evaluate to?", "check": {"type": "numeric", "value": 3}},
+    {"id": "code-04", "difficulty": "easy", "category": "code", "prompt": "In Python, what string does 'abc'.upper() return?", "check": {"type": "exact", "value": "ABC"}},
+    {"id": "code-05", "difficulty": "medium", "category": "code", "prompt": "In Python, what is the value of len([x for x in range(10) if x % 2 == 0])?", "check": {"type": "numeric", "value": 5}},
+    {"id": "code-06", "difficulty": "medium", "category": "code", "prompt": "In Python, what does sorted([3, 1, 2])[0] evaluate to?", "check": {"type": "numeric", "value": 1}},
+    {"id": "code-07", "difficulty": "medium", "category": "code", "prompt": "In Python, what is the value of sum(range(5))?", "check": {"type": "numeric", "value": 10}},
+    {"id": "code-08", "difficulty": "hard", "category": "code", "prompt": "In Python, the ** operator is right-associative. What is the value of 2 ** 3 ** 2?", "check": {"type": "numeric", "value": 512}}
+  ]
+}

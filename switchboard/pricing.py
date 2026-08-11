@@ -44,11 +44,17 @@ class PriceTable:
         prices: dict[str, ModelPrice],
         default: ModelPrice,
         baseline_model: str,
+        ladder: list[str],
     ) -> None:
         self._prices = prices
         self._default = default
         self.baseline_model = baseline_model
         self._warned: set[str] = set()
+
+        # Routable tiers, cheapest first. Sorted defensively rather than trusted
+        # from the file: a mis-ordered ladder would silently corrupt every
+        # routing decision that assumes index 0 is cheapest.
+        self.ladder = sorted(ladder, key=lambda m: self.for_model(m).cost(1000, 1000))
 
     @classmethod
     def load(cls, path: Path | str = DEFAULT_PRICES_PATH) -> PriceTable:
@@ -70,7 +76,16 @@ class PriceTable:
             prices=prices,
             default=build("default", raw["default"]),
             baseline_model=raw["baseline_model"],
+            ladder=list(raw["ladder"]),
         )
+
+    @property
+    def cheapest(self) -> str:
+        return self.ladder[0]
+
+    @property
+    def most_expensive(self) -> str:
+        return self.ladder[-1]
 
     def for_model(self, model: str) -> ModelPrice:
         """Price for a model, falling back to the default entry.

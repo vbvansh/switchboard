@@ -16,6 +16,9 @@
   "baseline_model": "qwen2.5:7b",
   "_baseline_note": "The model a naive 'give everyone the best' company would use. Every request records what it WOULD have cost here; that difference is the savings figure.",
 
+  "ladder": ["qwen2.5:1.5b", "qwen2.5:3b", "qwen3:4b", "qwen2.5:7b"],
+  "_ladder_note": "Routable tiers, cheapest first. Routing strategies pick from this list. stable-code is excluded: it is a base completion model, not instruction-tuned, so it cannot be compared fairly on instruction-following tasks.",
+
   "default": {
     "tier": "unknown",
     "stands_in_for": "unrecognised model - priced at mid tier so cost is never silently zero",
