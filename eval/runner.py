@@ -26,13 +26,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from eval.datasets import Task, TaskSet
+from eval.grading import FORMAT_PROSE, SYSTEM_PROMPT, extract_answer
 from switchboard.config import Settings
 from switchboard.pricing import PriceTable
 from switchboard.providers.ollama import OllamaProvider, ProviderUnavailable
 from switchboard.routing import RoutingContext, RoutingStrategy
-
-from eval.datasets import Task, TaskSet
-from eval.grading import SYSTEM_PROMPT, extract_answer
 
 DEFAULT_MAX_TOKENS = 600
 
@@ -50,7 +49,8 @@ class TaskResult:
     routing_reason: str
 
     correct: bool
-    followed_format: bool
+    #: "marker" | "bare" | "prose" - see eval.grading. Only "prose" is a risk.
+    answer_format: str
     answer: str
 
     prompt_tokens: int
@@ -198,7 +198,7 @@ class EvalRunner:
         prompt_tokens = int(usage.get("prompt_tokens") or 0)
         completion_tokens = int(usage.get("completion_tokens") or 0)
 
-        answer, followed_format = extract_answer(text)
+        answer, answer_format = extract_answer(text)
         correct = task.check.grade(answer)
 
         return TaskResult(
@@ -209,7 +209,7 @@ class EvalRunner:
             model=decision.model,
             routing_reason=decision.reason,
             correct=correct,
-            followed_format=followed_format,
+            answer_format=answer_format,
             answer=answer[:200],
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -248,7 +248,7 @@ class EvalRunner:
             model=decision.model,
             routing_reason=decision.reason,
             correct=False,
-            followed_format=False,
+            answer_format=FORMAT_PROSE,
             answer="",
             prompt_tokens=0,
             completion_tokens=0,

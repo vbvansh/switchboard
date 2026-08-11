@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from eval.grading import Check, extract_answer, strip_thinking
-
+from eval.grading import (
+    FORMAT_BARE,
+    FORMAT_MARKER,
+    FORMAT_PROSE,
+    Check,
+    extract_answer,
+    strip_thinking,
+)
 
 # --- Thinking blocks -------------------------------------------------------
 
@@ -34,7 +40,7 @@ def test_thinking_does_not_leak_into_the_answer() -> None:
 
 
 def test_marked_answer_is_extracted() -> None:
-    assert extract_answer("Some working.\nANSWER: 42") == ("42", True)
+    assert extract_answer("Some working.\nANSWER: 42") == ("42", FORMAT_MARKER)
 
 
 def test_last_marker_wins() -> None:
@@ -44,14 +50,24 @@ def test_last_marker_wins() -> None:
 
 
 def test_marker_is_case_insensitive() -> None:
-    answer, followed = extract_answer("answer: 7")
-    assert (answer, followed) == ("7", True)
+    assert extract_answer("answer: 7") == ("7", FORMAT_MARKER)
 
 
-def test_missing_marker_is_flagged_but_still_graded() -> None:
-    """Format failures are recorded, not silently punished."""
-    answer, followed = extract_answer("The result is 42")
-    assert followed is False
+def test_a_bare_value_is_not_treated_as_a_failure() -> None:
+    """Small models often reply with just the value. That is fine, not risky."""
+    answer, kind = extract_answer("45")
+    assert kind == FORMAT_BARE
+    assert Check("numeric", 45).grade(answer)
+
+
+def test_prose_without_a_marker_is_flagged_as_risky() -> None:
+    """Mining an answer out of long prose is where grading can go wrong."""
+    answer, kind = extract_answer(
+        "Let me work through this carefully. First we take the initial value "
+        "and consider what happens next, weighing up the options available. "
+        "After all that, the result is 42"
+    )
+    assert kind == FORMAT_PROSE
     assert Check("numeric", 42).grade(answer)
 
 

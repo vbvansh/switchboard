@@ -17,12 +17,29 @@ from dataclasses import dataclass
 ANSWER_MARKER = "ANSWER:"
 
 SYSTEM_PROMPT = (
-    "You are a concise assistant. Work through the problem briefly, then end "
-    "your reply with your final answer on its own line, in exactly this "
-    f"format:\n{ANSWER_MARKER} <answer>\n"
-    "Give only the value after the marker - no units, no explanation, no "
-    "punctuation. Write nothing after that line."
+    "You are a concise assistant. Think briefly if you need to, then finish "
+    "your reply with a final line in exactly this format:\n"
+    f"{ANSWER_MARKER} <value>\n"
+    "The value must be the bare answer - no units, no explanation, no "
+    "punctuation. Always include that line, even when it is your whole reply. "
+    "Write nothing after it."
 )
+
+# How the answer was recovered from the reply. Kept as three states rather than
+# a pass/fail flag because they carry very different risk:
+#
+#   marker - the model followed instructions; extraction is exact.
+#   bare   - no marker, but the whole reply was a short value. Harmless.
+#   prose  - no marker and a long reply, so the answer was guessed out of the
+#            text. These are the rows where a grading mistake is plausible, and
+#            the only ones worth flagging in a report.
+FORMAT_MARKER = "marker"
+FORMAT_BARE = "bare"
+FORMAT_PROSE = "prose"
+
+#: A reply no longer than this, with no marker, counts as a bare answer.
+BARE_ANSWER_MAX_CHARS = 60
+BARE_ANSWER_MAX_LINES = 2
 
 # Reasoning models (qwen3) wrap internal monologue in these. It must be removed
 # before grading or the marker search finds text from the model's scratchpad.
@@ -39,23 +56,29 @@ def strip_thinking(text: str) -> str:
     return UNCLOSED_THINK.sub(" ", text).strip()
 
 
-def extract_answer(text: str) -> tuple[str, bool]:
-    """Pull the marked answer out of a reply.
+def extract_answer(text: str) -> tuple[str, str]:
+    """Pull the answer out of a reply.
 
-    Returns (answer, followed_format). `followed_format` is recorded rather than
-    thrown away: small models frequently ignore output instructions, and how
-    often they do is itself a finding worth reporting.
+    Returns (answer, format_kind) where format_kind is one of FORMAT_MARKER,
+    FORMAT_BARE or FORMAT_PROSE - see the constants above for why this is three
+    states and not a pass/fail flag.
     """
     cleaned = strip_thinking(text)
 
     marker_at = cleaned.upper().rfind(ANSWER_MARKER)
     if marker_at != -1:
         answer = cleaned[marker_at + len(ANSWER_MARKER) :]
-        return answer.splitlines()[0].strip() if answer.strip() else "", True
+        first_line = answer.splitlines()[0].strip() if answer.strip() else ""
+        return first_line, FORMAT_MARKER
 
-    # No marker: fall back to the whole reply so a correct-but-unmarked answer
-    # still has a chance. Flagged so these are distinguishable in the results.
-    return cleaned.strip(), False
+    # No marker. Fall back to the whole reply so a correct-but-unmarked answer
+    # still counts - but distinguish a terse value from prose we had to mine.
+    stripped = cleaned.strip()
+    lines = [line for line in stripped.splitlines() if line.strip()]
+    is_bare = (
+        len(stripped) <= BARE_ANSWER_MAX_CHARS and len(lines) <= BARE_ANSWER_MAX_LINES
+    )
+    return stripped, FORMAT_BARE if is_bare else FORMAT_PROSE
 
 
 def _to_float(value: str) -> float | None:

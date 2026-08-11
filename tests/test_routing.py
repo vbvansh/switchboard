@@ -83,11 +83,12 @@ def test_always_ignores_the_prompt() -> None:
 
 def test_random_is_reproducible(prices: PriceTable) -> None:
     """An unseeded baseline would move between runs and ruin comparisons."""
-    first = [RandomModel(prices.ladder, seed=7).choose(ctx("q")).model for _ in range(1)]
-    second = [
-        RandomModel(prices.ladder, seed=7).choose(ctx("q")).model for _ in range(1)
-    ]
-    assert first == second
+    def draws(seed: int) -> list[str]:
+        strategy = RandomModel(prices.ladder, seed=seed)
+        return [strategy.choose(ctx(f"q{i}")).model for i in range(20)]
+
+    assert draws(7) == draws(7)
+    assert draws(7) != draws(8)
 
 
 def test_random_stays_inside_the_ladder(prices: PriceTable) -> None:
@@ -156,7 +157,8 @@ def test_every_baseline_can_be_built(name: str, prices: PriceTable) -> None:
 
 
 def test_always_prefix_builds_an_arbitrary_model(prices: PriceTable) -> None:
-    assert build_strategy("always:qwen3:4b", prices).choose(ctx("x")).model == "qwen3:4b"
+    strategy = build_strategy("always:qwen3:4b", prices)
+    assert strategy.choose(ctx("x")).model == "qwen3:4b"
 
 
 def test_unknown_strategy_names_are_rejected(prices: PriceTable) -> None:

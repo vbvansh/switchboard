@@ -11,6 +11,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from eval.grading import FORMAT_MARKER, FORMAT_PROSE
 from eval.runner import TaskResult
 
 REFERENCE_STRATEGY = "always-expensive"
@@ -25,7 +26,11 @@ class StrategySummary:
     baseline_usd: float
     latency_ms_total: int
     model_switches: int
-    format_failures: int
+    #: Used the requested ANSWER: marker.
+    marked_answers: int
+    #: No marker and a long reply, so the answer was mined out of prose. These
+    #: are the rows where a grading mistake is plausible.
+    risky_extractions: int
     truncations: int
     errors: int
     model_usage: dict[str, int]
@@ -68,7 +73,12 @@ def summarise(results: list[TaskResult]) -> list[StrategySummary]:
                 baseline_usd=sum(r.baseline_cost_usd for r in rows),
                 latency_ms_total=sum(r.latency_ms for r in rows),
                 model_switches=sum(1 for r in rows if r.caused_model_switch),
-                format_failures=sum(1 for r in rows if not r.followed_format),
+                marked_answers=sum(
+                    1 for r in rows if r.answer_format == FORMAT_MARKER
+                ),
+                risky_extractions=sum(
+                    1 for r in rows if r.answer_format == FORMAT_PROSE
+                ),
                 truncations=sum(1 for r in rows if r.truncated),
                 errors=sum(1 for r in rows if r.error),
                 model_usage=dict(Counter(r.model for r in rows)),
@@ -82,7 +92,8 @@ def summarise(results: list[TaskResult]) -> list[StrategySummary]:
 
 def to_markdown(summaries: list[StrategySummary]) -> str:
     lines = [
-        "| Strategy | Accuracy | Cost (sim.) | Saved vs top tier | Avg latency | Switches |",
+        "| Strategy | Accuracy | Cost (sim.) | Saved vs top tier "
+        "| Avg latency | Switches |",
         "|---|---|---|---|---|---|",
     ]
     for s in summaries:

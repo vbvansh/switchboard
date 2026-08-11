@@ -297,7 +297,9 @@ def eval_run(
         try:
             results, _ = asyncio.run(runner.run(tasks, chosen, output, progress=tick))
         except KeyboardInterrupt:
-            console.print(f"\n[yellow]Interrupted. Partial results in {output}[/yellow]")
+            console.print(
+                f"\n[yellow]Interrupted. Partial results in {output}[/yellow]"
+            )
             raise typer.Exit(code=130) from None
 
     console.print(f"\n[green]Done.[/green] Raw results: {output}\n")
@@ -337,7 +339,8 @@ def eval_report(
     table.add_column("Saved", justify="right")
     table.add_column("Avg latency", justify="right")
     table.add_column("Switches", justify="right")
-    table.add_column("Format misses", justify="right")
+    table.add_column("Marked", justify="right")
+    table.add_column("Risky", justify="right")
 
     for s in summaries:
         table.add_row(
@@ -347,9 +350,14 @@ def eval_report(
             f"{s.saved_vs_baseline_pct:.1f}%",
             f"{s.avg_latency_ms} ms",
             str(s.model_switches),
-            str(s.format_failures),
+            f"{s.marked_answers}/{s.tasks}",
+            str(s.risky_extractions),
         )
     console.print(table)
+    console.print(
+        "[dim]Marked = used the ANSWER: format. Risky = answer mined out of "
+        "prose, where a grading mistake is plausible.[/dim]"
+    )
 
     breakdown = Table(title="Accuracy by difficulty")
     breakdown.add_column("Strategy")

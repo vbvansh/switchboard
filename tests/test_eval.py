@@ -15,7 +15,6 @@ from switchboard.config import Settings
 from switchboard.pricing import PriceTable
 from switchboard.routing import build_strategy
 
-
 # --- Task set integrity ----------------------------------------------------
 
 
@@ -43,9 +42,7 @@ def test_every_task_has_a_working_check() -> None:
 def test_reference_answers_grade_as_correct() -> None:
     """The expected answer must actually pass its own check."""
     for task in load_taskset("builtin"):
-        if task.check.type == "numeric":
-            assert task.check.grade(str(task.check.value)), task.id
-        elif task.check.type == "exact":
+        if task.check.type == "numeric" or task.check.type == "exact":
             assert task.check.grade(str(task.check.value)), task.id
         else:
             assert task.check.grade(" ".join(task.check.values)), task.id
@@ -91,7 +88,10 @@ class ScriptedProvider:
                 {
                     "choices": [
                         {
-                            "message": {"content": f"Working on: {question}\nANSWER: {answer}"},
+                            "message": {
+                                "content": f"Working on: {question}\n"
+                                f"ANSWER: {answer}"
+                            },
                             "finish_reason": "stop",
                         }
                     ],
@@ -251,7 +251,7 @@ def _result(strategy: str, model: str, correct: bool, cost: float) -> TaskResult
         model=model,
         routing_reason="",
         correct=correct,
-        followed_format=True,
+        answer_format="marker",
         answer="",
         prompt_tokens=100,
         completion_tokens=50,
