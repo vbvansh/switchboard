@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from switchboard.pricing import PriceTable
+from switchboard.catalog import ModelCatalog
 from switchboard.routing import (
     BASELINE_NAMES,
     AlwaysModel,
@@ -22,26 +22,19 @@ def ctx(text: str) -> RoutingContext:
 # --- Ladder ----------------------------------------------------------------
 
 
-def test_ladder_is_ordered_cheapest_first(prices: PriceTable) -> None:
+def test_ladder_is_ordered_cheapest_first(prices: ModelCatalog) -> None:
     costs = [prices.cost(m, 1000, 1000) for m in prices.ladder]
     assert costs == sorted(costs)
 
 
-def test_ladder_endpoints(prices: PriceTable) -> None:
+def test_ladder_endpoints(prices: ModelCatalog) -> None:
     assert prices.cheapest == "qwen2.5:1.5b"
     assert prices.most_expensive == "qwen2.5:7b"
 
 
-def test_ladder_is_sorted_even_if_the_file_is_not(prices: PriceTable) -> None:
-    """A mis-ordered ladder in prices.json must not corrupt routing."""
-    shuffled = PriceTable(
-        prices={m: prices.for_model(m) for m in prices.known_models()},
-        default=prices.for_model("unknown-model"),
-        baseline_model="qwen2.5:7b",
-        ladder=["qwen2.5:7b", "qwen2.5:1.5b", "qwen3:4b", "qwen2.5:3b"],
-    )
-    assert shuffled.cheapest == "qwen2.5:1.5b"
-    assert shuffled.most_expensive == "qwen2.5:7b"
+# A mis-ordered ladder is rejected at load rather than silently re-sorted -
+# see test_catalog.py::test_mis_ordered_ladder_is_rejected. Sorting quietly
+# would hide the operator's mistake instead of pointing at the line to fix.
 
 
 # --- Context ---------------------------------------------------------------
@@ -81,7 +74,7 @@ def test_always_ignores_the_prompt() -> None:
 # --- Random ----------------------------------------------------------------
 
 
-def test_random_is_reproducible(prices: PriceTable) -> None:
+def test_random_is_reproducible(prices: ModelCatalog) -> None:
     """An unseeded baseline would move between runs and ruin comparisons."""
     def draws(seed: int) -> list[str]:
         strategy = RandomModel(prices.ladder, seed=seed)
@@ -91,13 +84,13 @@ def test_random_is_reproducible(prices: PriceTable) -> None:
     assert draws(7) != draws(8)
 
 
-def test_random_stays_inside_the_ladder(prices: PriceTable) -> None:
+def test_random_stays_inside_the_ladder(prices: ModelCatalog) -> None:
     strategy = RandomModel(prices.ladder, seed=1)
     picks = {strategy.choose(ctx(f"question {i}")).model for i in range(50)}
     assert picks <= set(prices.ladder)
 
 
-def test_random_actually_varies(prices: PriceTable) -> None:
+def test_random_actually_varies(prices: ModelCatalog) -> None:
     strategy = RandomModel(prices.ladder, seed=1)
     picks = {strategy.choose(ctx(f"question {i}")).model for i in range(50)}
     assert len(picks) > 1
@@ -106,12 +99,12 @@ def test_random_actually_varies(prices: PriceTable) -> None:
 # --- Keyword heuristic -----------------------------------------------------
 
 
-def test_short_simple_prompts_go_cheap(prices: PriceTable) -> None:
+def test_short_simple_prompts_go_cheap(prices: ModelCatalog) -> None:
     strategy = KeywordHeuristic(prices.ladder)
     assert strategy.choose(ctx("list the days")).model == prices.cheapest
 
 
-def test_reasoning_words_escalate(prices: PriceTable) -> None:
+def test_reasoning_words_escalate(prices: ModelCatalog) -> None:
     strategy = KeywordHeuristic(prices.ladder)
     cheap = strategy.choose(ctx("list the days")).model
     hard = strategy.choose(
@@ -124,13 +117,13 @@ def test_reasoning_words_escalate(prices: PriceTable) -> None:
     assert prices.ladder.index(hard) > prices.ladder.index(cheap)
 
 
-def test_decisions_stay_inside_the_ladder(prices: PriceTable) -> None:
+def test_decisions_stay_inside_the_ladder(prices: ModelCatalog) -> None:
     strategy = KeywordHeuristic(prices.ladder)
     for text in ["", "x", "why " * 500, "prove derive explain analyse debug"]:
         assert strategy.choose(ctx(text)).model in prices.ladder
 
 
-def test_keyword_heuristic_cannot_tell_these_apart(prices: PriceTable) -> None:
+def test_keyword_heuristic_cannot_tell_these_apart(prices: ModelCatalog) -> None:
     """The documented weakness, pinned as a test.
 
     Both contain 'why'; one is trivia and one needs real reasoning. Milestone 4
@@ -151,22 +144,22 @@ def test_empty_ladder_is_rejected() -> None:
 
 
 @pytest.mark.parametrize("name", BASELINE_NAMES)
-def test_every_baseline_can_be_built(name: str, prices: PriceTable) -> None:
+def test_every_baseline_can_be_built(name: str, prices: ModelCatalog) -> None:
     strategy = build_strategy(name, prices)
     assert strategy.choose(ctx("hello")).model in prices.ladder
 
 
-def test_always_prefix_builds_an_arbitrary_model(prices: PriceTable) -> None:
+def test_always_prefix_builds_an_arbitrary_model(prices: ModelCatalog) -> None:
     strategy = build_strategy("always:qwen3:4b", prices)
     assert strategy.choose(ctx("x")).model == "qwen3:4b"
 
 
-def test_unknown_strategy_names_are_rejected(prices: PriceTable) -> None:
+def test_unknown_strategy_names_are_rejected(prices: ModelCatalog) -> None:
     with pytest.raises(ValueError, match="Unknown strategy"):
         build_strategy("magic", prices)
 
 
-def test_decisions_explain_themselves(prices: PriceTable) -> None:
+def test_decisions_explain_themselves(prices: ModelCatalog) -> None:
     """Without a reason, a wrong routing decision cannot be debugged."""
     decision = build_strategy("keyword", prices).choose(ctx("explain why"))
     assert decision.reason

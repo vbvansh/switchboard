@@ -1,6 +1,6 @@
 """Shared fixtures.
 
-Every test runs against an in-memory SQLite database and a stubbed provider, so
+Every test runs against an in-memory SQLite database and stubbed providers, so
 the suite needs neither Ollama running nor a file on disk.
 """
 
@@ -11,15 +11,21 @@ import json
 import httpx
 import pytest
 
+from switchboard.catalog import ModelCatalog
 from switchboard.ledger import Database, LedgerService
 from switchboard.ledger.service import STATUS_OK
-from switchboard.pricing import PriceTable
-from switchboard.providers.ollama import ProviderUnavailable
+from switchboard.providers import ProviderUnavailable
 
 
 @pytest.fixture
-def prices() -> PriceTable:
-    return PriceTable.load()
+def prices() -> ModelCatalog:
+    """The real providers.yaml, so tests fail if the shipped catalog breaks."""
+    return ModelCatalog.load()
+
+
+@pytest.fixture
+def catalog(prices: ModelCatalog) -> ModelCatalog:
+    return prices
 
 
 @pytest.fixture
@@ -31,14 +37,15 @@ def database() -> Database:
 
 
 @pytest.fixture
-def ledger(database: Database, prices: PriceTable) -> LedgerService:
+def ledger(database: Database, prices: ModelCatalog) -> LedgerService:
     return LedgerService(database, prices, store_prompts=True)
 
 
 class StubProvider:
-    """Stands in for Ollama. Records what the proxy forwarded upstream."""
+    """Stands in for an upstream. Records what the proxy forwarded."""
 
-    def __init__(self) -> None:
+    def __init__(self, provider_id: str = "stub") -> None:
+        self.id = provider_id
         self.healthy = True
         self.last_payload: dict | None = None
         self.prompt_tokens = 1000
@@ -83,12 +90,30 @@ class StubProvider:
             )
         yield b"data: [DONE]\n\n"
 
-    async def list_models(self) -> httpx.Response:
-        if not self.healthy:
-            raise ProviderUnavailable("stub is down")
-        return httpx.Response(
-            200, content=json.dumps({"data": [{"id": "qwen2.5:3b"}]}).encode()
-        )
+
+class StubPool:
+    """A ProviderPool that hands out one stub for every model."""
+
+    def __init__(self, provider: StubProvider, catalog: ModelCatalog) -> None:
+        self.provider = provider
+        self._catalog = catalog
+
+    def for_model(self, model: str):
+        if self._catalog.provider_for(model) is None:
+            raise ProviderUnavailable(f"No provider declares model {model!r}.")
+        return self.provider
+
+    def available_models(self) -> list[str]:
+        return self._catalog.known_models()
+
+    def unconfigured(self) -> dict[str, str]:
+        return {}
+
+    async def health(self) -> dict[str, bool]:
+        return {self.provider.id: self.provider.healthy}
+
+    async def aclose(self) -> None:
+        await self.provider.aclose()
 
 
 @pytest.fixture
@@ -97,18 +122,29 @@ def provider() -> StubProvider:
 
 
 @pytest.fixture
-def client(database: Database, ledger: LedgerService, provider: StubProvider):
+def pool(provider: StubProvider, prices: ModelCatalog) -> StubPool:
+    return StubPool(provider, prices)
+
+
+@pytest.fixture
+def client(
+    database: Database,
+    ledger: LedgerService,
+    pool: StubPool,
+    prices: ModelCatalog,
+):
     """TestClient with lifespan bypassed.
 
     Entering TestClient as a context manager would run the real lifespan and
-    build a live Ollama client plus an on-disk database. These tests must pass
-    with Ollama stopped and must not touch the filesystem.
+    build live HTTP clients plus an on-disk database. These tests must pass
+    with no provider running and must not touch the filesystem.
     """
     from fastapi.testclient import TestClient
 
     from switchboard import api
 
-    api.app.state.provider = provider
+    api.app.state.pool = pool
+    api.app.state.catalog = prices
     api.app.state.database = database
     api.app.state.ledger = ledger
     return TestClient(api.app)
@@ -125,4 +161,4 @@ def auth(alice):
     return {"Authorization": f"Bearer {alice.api_key}"}
 
 
-__all__ = ["STATUS_OK", "StubProvider"]
+__all__ = ["STATUS_OK", "StubPool", "StubProvider"]

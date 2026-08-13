@@ -1,0 +1,129 @@
+# Switchboard provider registry
+# =============================================================================
+# Declare which AI providers you have and which models they offer. This is the
+# only file you need to edit to add a provider - no Python changes.
+#
+# Everything else in Switchboard reads from here: routing decisions, cost
+# accounting, failover, and the dashboard.
+#
+# API KEYS DO NOT GO IN THIS FILE. Use `api_key_env` to name an environment
+# variable holding the key. This file is safe to commit; keys are not.
+# =============================================================================
+
+# The model a "just give everyone the best" setup would use. Every request
+# records what it WOULD have cost here - that difference is the savings figure.
+baseline_model: qwen2.5:7b
+
+# Models the router may choose between, cheapest first. Order is validated on
+# load, so a mistake here fails immediately rather than corrupting decisions.
+# Models can exist without being on the ladder - they stay directly callable
+# but the router will not pick them.
+ladder:
+  - qwen2.5:1.5b
+  - qwen2.5:3b
+  - qwen3:4b
+  - qwen2.5:7b
+
+# Fallback pricing for a model not declared below. Never zero: an unpriced
+# model costing nothing would understate spend and overstate savings.
+default_pricing:
+  input_per_mtok: 1.0
+  output_per_mtok: 5.0
+
+providers:
+  # ---------------------------------------------------------------------------
+  # Local Ollama. No API key, no network egress, no cost.
+  #
+  # Prices below are SIMULATED. Local inference is free; each model is given
+  # the price tag of a commercial model of comparable capability so that budget
+  # accounting and savings figures mean something. Adjust to taste.
+  # ---------------------------------------------------------------------------
+  - id: ollama-local
+    type: openai-compatible
+    base_url: http://localhost:11434/v1
+    enabled: true
+    simulated_pricing: true
+    timeout_seconds: 600      # a cold 7b load on a small GPU is slow to start
+
+    models:
+      - id: qwen2.5:1.5b
+        tier: T0
+        stands_in_for: budget/nano commercial tier
+        input_per_mtok: 0.10
+        output_per_mtok: 0.40
+        context_window: 32768
+
+      - id: qwen2.5:3b
+        tier: T1
+        stands_in_for: small general-purpose commercial tier
+        input_per_mtok: 0.25
+        output_per_mtok: 1.25
+        context_window: 32768
+
+      - id: qwen3:4b
+        tier: T2
+        stands_in_for: mid reasoning tier
+        # Output priced high because this model emits <think> blocks, which
+        # inflate completion length by roughly 50x. Measured, not guessed:
+        # 324 output tokens on average versus 4 for the others.
+        input_per_mtok: 1.00
+        output_per_mtok: 5.00
+        context_window: 32768
+        emits_thinking: true
+
+      - id: qwen2.5:7b
+        tier: T3
+        stands_in_for: frontier tier
+        input_per_mtok: 3.00
+        output_per_mtok: 15.00
+        context_window: 32768
+
+      - id: stable-code:3b-code-q4_0
+        tier: T0-code
+        stands_in_for: small code-completion model
+        input_per_mtok: 0.15
+        output_per_mtok: 0.60
+        context_window: 16384
+        # Base completion model, not instruction-tuned. Kept callable but off
+        # the ladder: it cannot follow chat instructions, so comparing it on
+        # instruction-following tasks would be meaningless.
+
+  # ---------------------------------------------------------------------------
+  # Commercial providers. All disabled by default - enable the ones you have
+  # keys for. PRICES BELOW ARE PLACEHOLDERS: check your provider's current
+  # price list and correct them before trusting any cost figure.
+  # ---------------------------------------------------------------------------
+
+  # OpenRouter is the most useful single entry: one key reaches models from
+  # many vendors, including Anthropic's Claude, through the OpenAI-compatible
+  # format. That is how to use Claude here without a separate adapter.
+  - id: openrouter
+    type: openai-compatible
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    enabled: false
+    models: []
+
+  - id: openai
+    type: openai-compatible
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    enabled: false
+    models: []
+
+  # Free tier available at time of writing. Verify current limits yourself.
+  - id: groq
+    type: openai-compatible
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    enabled: false
+    models: []
+
+  # Self-hosted inference servers speak the same format. Point this at your own
+  # vLLM, LM Studio, llama.cpp, or TGI instance.
+  - id: self-hosted
+    type: openai-compatible
+    base_url: http://your-server:8000/v1
+    api_key_env: SELF_HOSTED_API_KEY
+    enabled: false
+    models: []

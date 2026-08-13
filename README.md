@@ -1,12 +1,18 @@
 # Switchboard
 
-A local-only AI model router. It sits between an application and a pool of
+A self-hostable AI model router. It sits between an application and a pool of
 models, decides which model is cheap enough and good enough for each request,
-enforces per-user budgets, and blocks requests that shouldn't be served.
+enforces per-user budgets, and records what every request cost — and what it
+would have cost otherwise.
 
-Runs entirely on local Ollama models. **No API keys. No paid providers. No
-inference request leaves the machine.** That is enforced by a startup check
-(`switchboard/config.py`) and covered by tests, not left to convention.
+Bring your own providers. Switchboard speaks the OpenAI API, so any application
+that already talks to OpenAI works by changing one URL, and any provider that
+speaks that format — Ollama, OpenAI, Groq, OpenRouter, Together, vLLM, LM Studio
+— is a few lines of YAML away.
+
+**Runs entirely offline if you want it to.** Point it at a local Ollama and turn
+on `SWITCHBOARD_LOCAL_ONLY=true`, and it will refuse to start if any configured
+provider is off-machine.
 
 ## Status
 
@@ -69,11 +75,39 @@ without touching your data, and it is safe to run when nothing has changed.
 Switchboard refuses to start against a database it does not recognise rather
 than failing confusingly later.
 
-Ollama must be running. Confirm it and see the available tiers with prices:
+See what providers and models are configured, and check they are reachable:
 
 ```powershell
+python -m switchboard providers
 python -m switchboard check
 ```
+
+## Adding a provider
+
+Edit [`providers.yaml`](providers.yaml) — no code changes. Set `enabled: true`,
+list the models you want with their prices, and name the environment variable
+holding your key:
+
+```yaml
+- id: groq
+  type: openai-compatible
+  base_url: https://api.groq.com/openai/v1
+  api_key_env: GROQ_API_KEY
+  enabled: true
+  models:
+    - id: llama-3.3-70b-versatile
+      tier: T2
+      input_per_mtok: 0.59
+      output_per_mtok: 0.79
+      context_window: 131072
+```
+
+**Keys never go in this file.** `api_key_env` names an environment variable;
+the key lives in `.env` or your secret store. `providers.yaml` stays safe to
+commit.
+
+Claude and other Anthropic models are reachable through OpenRouter, which
+exposes them in the OpenAI format — no separate adapter needed.
 
 Create a developer. The API key is shown **once** — only its hash is stored.
 

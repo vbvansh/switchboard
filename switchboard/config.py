@@ -1,25 +1,19 @@
-"""Configuration for Switchboard.
+"""Runtime configuration.
 
-The one rule enforced here that matters: the inference provider must be local.
-See `_require_local_host` - it is the mechanical guarantee that no request ever
-leaves this machine and that no paid API can ever be contacted, even by
-accident. There is deliberately no escape hatch. If remote Ollama is ever
-needed, add an explicit allowlist rather than loosening this check.
+Providers and models are NOT configured here - they live in providers.yaml so
+users can add them without touching Python. This file holds only settings that
+change how the process behaves.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlparse
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Hostnames that unambiguously resolve to this machine.
-LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Model name a client can send to hand model choice to Switchboard. Milestone 1
-# resolves it to `default_model`; from milestone 3 it triggers real routing.
+# Model name a client can send to hand model choice to Switchboard.
 AUTO_MODEL = "auto"
 
 
@@ -31,21 +25,25 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- Provider -----------------------------------------------------------
-    ollama_base_url: str = "http://localhost:11434"
+    # --- Providers ----------------------------------------------------------
+    providers_file: str = str(PROJECT_ROOT / "providers.yaml")
 
-    # Milestone 1 sends everything here. The tier ladder replaces it later.
+    # Model used when a client sends "auto" or omits the field. Until the
+    # router lands, this serves every request.
     default_model: str = "qwen2.5:3b"
+
+    # Refuse to start if any enabled provider is not on this machine.
+    #
+    # Off by default, because talking to providers is the point of the product.
+    # Switch it on and Switchboard becomes physically incapable of sending
+    # prompts outside the host - which is what some organisations need before
+    # they will let a gateway near their data. Enforced at startup, not per
+    # request, so a violation is caught immediately rather than at 3am.
+    local_only: bool = False
 
     # --- Server -------------------------------------------------------------
     host: str = "127.0.0.1"
     port: int = 8000
-
-    # --- Timeouts -----------------------------------------------------------
-    # Read timeout is deliberately large: a cold 7b load on a 4GB GPU spills to
-    # system RAM and can take well over a minute before the first token.
-    connect_timeout: float = 10.0
-    read_timeout: float = 600.0
 
     # --- Ledger -------------------------------------------------------------
     database_url: str = "sqlite:///data/switchboard.db"
@@ -62,37 +60,6 @@ class Settings(BaseSettings):
     # So it stays available, as a deliberate opt-in the operator has to read
     # about and choose. Safe by default, useful on request.
     store_prompts: bool = False
-
-    # Simulated price table. Lives in git so price changes appear in a diff.
-    prices_file: str = str(Path(__file__).parent / "prices.json")
-
-    @field_validator("ollama_base_url")
-    @classmethod
-    def _require_local_host(cls, value: str) -> str:
-        parsed = urlparse(value)
-
-        if parsed.scheme not in {"http", "https"}:
-            raise ValueError(
-                f"ollama_base_url must be an http(s) URL, got {value!r}"
-            )
-
-        host = parsed.hostname
-        if host is None:
-            raise ValueError(f"ollama_base_url has no host: {value!r}")
-
-        if host.lower() not in LOCAL_HOSTS:
-            raise ValueError(
-                f"Refusing non-local provider host {host!r}. Switchboard runs "
-                "100% locally against Ollama; it holds no API keys and must "
-                "never contact a remote inference endpoint."
-            )
-
-        return value.rstrip("/")
-
-    @property
-    def openai_compat_url(self) -> str:
-        """Ollama's OpenAI-compatible API root."""
-        return f"{self.ollama_base_url}/v1"
 
 
 settings = Settings()

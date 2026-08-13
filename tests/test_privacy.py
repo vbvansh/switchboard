@@ -7,9 +7,9 @@ undone by accident.
 
 from __future__ import annotations
 
+from switchboard.catalog import ModelCatalog
 from switchboard.config import Settings
 from switchboard.ledger import Database, LedgerService
-from switchboard.pricing import PriceTable
 
 
 def test_prompt_storage_is_off_by_default() -> None:
@@ -29,7 +29,7 @@ def test_prompt_storage_can_be_switched_on_deliberately() -> None:
 def test_default_settings_record_no_prompt_text(database: Database) -> None:
     """End to end: with stock settings, prompt text never reaches the database."""
     service = LedgerService(
-        database, PriceTable.load(), store_prompts=Settings().store_prompts
+        database, ModelCatalog.load(), store_prompts=Settings().store_prompts
     )
     user = service.authenticate(service.create_user("alice", 50.0).api_key)
 
@@ -49,7 +49,7 @@ def test_default_settings_record_no_prompt_text(database: Database) -> None:
 
 def test_costs_are_still_recorded_without_prompt_text(database: Database) -> None:
     """Privacy must not cost you the accounting - that is the whole product."""
-    service = LedgerService(database, PriceTable.load(), store_prompts=False)
+    service = LedgerService(database, ModelCatalog.load(), store_prompts=False)
     user = service.authenticate(service.create_user("alice", 50.0).api_key)
 
     entry = service.record(

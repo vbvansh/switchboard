@@ -12,10 +12,10 @@ from datetime import datetime
 
 from sqlalchemy import func, select
 
+from switchboard.catalog import ModelCatalog
 from switchboard.ledger.db import Database
 from switchboard.ledger.keys import generate_api_key, hash_api_key
 from switchboard.ledger.models import RequestLog, User, utcnow
-from switchboard.pricing import PriceTable
 
 # Status values written to RequestLog.status.
 STATUS_OK = "ok"
@@ -96,9 +96,11 @@ def estimate_tokens(text: str) -> int:
 
 
 class LedgerService:
-    def __init__(self, db: Database, prices: PriceTable, store_prompts: bool) -> None:
+    def __init__(
+        self, db: Database, catalog: ModelCatalog, store_prompts: bool
+    ) -> None:
         self._db = db
-        self._prices = prices
+        self._prices = catalog
         self._store_prompts = store_prompts
 
         # In-memory proxy for VRAM cold loads. Not persisted: it describes the

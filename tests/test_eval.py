@@ -11,8 +11,8 @@ import pytest
 from eval.datasets import load_taskset
 from eval.report import summarise, to_markdown
 from eval.runner import EvalRunner, TaskResult, load_results
+from switchboard.catalog import ModelCatalog
 from switchboard.config import Settings
-from switchboard.pricing import PriceTable
 from switchboard.routing import build_strategy
 
 # --- Task set integrity ----------------------------------------------------
@@ -101,8 +101,26 @@ class ScriptedProvider:
         )
 
 
+class ScriptedPool:
+    """Minimal ProviderPool that hands the scripted provider to every model."""
+
+    def __init__(self, provider: ScriptedProvider) -> None:
+        self.provider = provider
+
+    def for_model(self, model: str) -> ScriptedProvider:
+        return self.provider
+
+    async def aclose(self) -> None:
+        await self.provider.aclose()
+
+
+def _pool_factory(provider: ScriptedProvider):
+    """Replacement for ProviderPool's constructor inside the runner."""
+    return lambda catalog, local_only=False: ScriptedPool(provider)
+
+
 @pytest.fixture
-def runner(prices: PriceTable) -> EvalRunner:
+def runner(prices: ModelCatalog) -> EvalRunner:
     return EvalRunner(Settings(), prices)
 
 
@@ -112,11 +130,11 @@ def one_task():
 
 
 def test_runner_grades_and_prices_a_task(
-    runner: EvalRunner, one_task, prices: PriceTable, tmp_path: Path, monkeypatch
+    runner: EvalRunner, one_task, prices: ModelCatalog, tmp_path: Path, monkeypatch
 ) -> None:
     provider = ScriptedProvider(competent_models=set(prices.ladder))
     monkeypatch.setattr(
-        "eval.runner.OllamaProvider", lambda settings: provider
+        "eval.runner.ProviderPool", _pool_factory(provider)
     )
 
     import asyncio
@@ -138,10 +156,10 @@ def test_runner_grades_and_prices_a_task(
 
 
 def test_runner_records_incorrect_answers(
-    runner: EvalRunner, one_task, prices: PriceTable, tmp_path: Path, monkeypatch
+    runner: EvalRunner, one_task, prices: ModelCatalog, tmp_path: Path, monkeypatch
 ) -> None:
     provider = ScriptedProvider(competent_models={prices.most_expensive})
-    monkeypatch.setattr("eval.runner.OllamaProvider", lambda settings: provider)
+    monkeypatch.setattr("eval.runner.ProviderPool", _pool_factory(provider))
 
     import asyncio
 
@@ -156,11 +174,11 @@ def test_runner_records_incorrect_answers(
 
 
 def test_runner_applies_the_same_system_prompt_to_every_model(
-    runner: EvalRunner, one_task, prices: PriceTable, tmp_path: Path, monkeypatch
+    runner: EvalRunner, one_task, prices: ModelCatalog, tmp_path: Path, monkeypatch
 ) -> None:
     """Fairness: no strategy may get a different prompt."""
     provider = ScriptedProvider(competent_models=set(prices.ladder))
-    monkeypatch.setattr("eval.runner.OllamaProvider", lambda settings: provider)
+    monkeypatch.setattr("eval.runner.ProviderPool", _pool_factory(provider))
 
     import asyncio
 
@@ -182,11 +200,11 @@ def test_runner_applies_the_same_system_prompt_to_every_model(
 
 
 def test_results_stream_to_disk_and_reload(
-    runner: EvalRunner, prices: PriceTable, tmp_path: Path, monkeypatch
+    runner: EvalRunner, prices: ModelCatalog, tmp_path: Path, monkeypatch
 ) -> None:
     """A long run must survive being interrupted."""
     provider = ScriptedProvider(competent_models=set(prices.ladder))
-    monkeypatch.setattr("eval.runner.OllamaProvider", lambda settings: provider)
+    monkeypatch.setattr("eval.runner.ProviderPool", _pool_factory(provider))
 
     import asyncio
 
@@ -201,10 +219,10 @@ def test_results_stream_to_disk_and_reload(
 
 
 def test_model_switches_are_counted(
-    runner: EvalRunner, prices: PriceTable, tmp_path: Path, monkeypatch
+    runner: EvalRunner, prices: ModelCatalog, tmp_path: Path, monkeypatch
 ) -> None:
     provider = ScriptedProvider(competent_models=set(prices.ladder))
-    monkeypatch.setattr("eval.runner.OllamaProvider", lambda settings: provider)
+    monkeypatch.setattr("eval.runner.ProviderPool", _pool_factory(provider))
 
     import asyncio
 
@@ -217,11 +235,11 @@ def test_model_switches_are_counted(
 
 
 def test_each_strategy_starts_with_no_warm_model(
-    runner: EvalRunner, prices: PriceTable, tmp_path: Path, monkeypatch
+    runner: EvalRunner, prices: ModelCatalog, tmp_path: Path, monkeypatch
 ) -> None:
     """Otherwise the second strategy inherits the first one's warm state."""
     provider = ScriptedProvider(competent_models=set(prices.ladder))
-    monkeypatch.setattr("eval.runner.OllamaProvider", lambda settings: provider)
+    monkeypatch.setattr("eval.runner.ProviderPool", _pool_factory(provider))
 
     import asyncio
 

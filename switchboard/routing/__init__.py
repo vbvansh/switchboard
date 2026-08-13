@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from switchboard.pricing import PriceTable
+from switchboard.catalog import ModelCatalog
 from switchboard.routing.base import (
     RoutingContext,
     RoutingDecision,
@@ -18,20 +18,22 @@ from switchboard.routing.baselines import (
 BASELINE_NAMES = ("always-cheap", "always-expensive", "random", "keyword")
 
 
-def build_strategy(name: str, prices: PriceTable, seed: int = 0) -> RoutingStrategy:
+def build_strategy(
+    name: str, catalog: ModelCatalog, seed: int = 0
+) -> RoutingStrategy:
     """Construct a strategy by name.
 
     Names rather than classes so a strategy can be selected from a CLI flag, a
     config file, or a results file without importing anything.
     """
     if name == "always-cheap":
-        return AlwaysModel(prices.cheapest, name="always-cheap")
+        return AlwaysModel(catalog.cheapest, name="always-cheap")
     if name == "always-expensive":
-        return AlwaysModel(prices.most_expensive, name="always-expensive")
+        return AlwaysModel(catalog.most_expensive, name="always-expensive")
     if name == "random":
-        return RandomModel(prices.ladder, seed=seed)
+        return RandomModel(list(catalog.ladder), seed=seed)
     if name == "keyword":
-        return KeywordHeuristic(prices.ladder)
+        return KeywordHeuristic(list(catalog.ladder))
     if name.startswith("always:"):
         return AlwaysModel(name.split(":", 1)[1])
 

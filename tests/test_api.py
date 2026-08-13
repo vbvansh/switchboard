@@ -24,7 +24,20 @@ def test_health_needs_no_credentials(client: TestClient) -> None:
     """A health check that requires a key is useless to a monitoring system."""
     payload = client.get("/health").json()
     assert payload["status"] == "ok"
-    assert payload["provider_reachable"] is True
+    assert any(payload["providers"].values())
+
+
+def test_health_reports_degraded_when_every_provider_is_down(
+    client: TestClient, provider
+) -> None:
+    """A monitoring system needs to distinguish "up" from "up but useless"."""
+    provider.healthy = False
+    assert client.get("/health").json()["status"] == "degraded"
+
+
+def test_health_surfaces_simulated_pricing(client: TestClient) -> None:
+    """Operators must never mistake a simulated saving for a real one."""
+    assert client.get("/health").json()["simulated_pricing"] is True
 
 
 # --- Identity --------------------------------------------------------------

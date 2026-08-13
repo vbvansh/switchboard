@@ -28,9 +28,9 @@ from typing import Any
 
 from eval.datasets import Task, TaskSet
 from eval.grading import FORMAT_PROSE, SYSTEM_PROMPT, extract_answer
+from switchboard.catalog import ModelCatalog
 from switchboard.config import Settings
-from switchboard.pricing import PriceTable
-from switchboard.providers.ollama import OllamaProvider, ProviderUnavailable
+from switchboard.providers import Provider, ProviderPool, ProviderUnavailable
 from switchboard.routing import RoutingContext, RoutingStrategy
 
 DEFAULT_MAX_TOKENS = 600
@@ -78,7 +78,7 @@ class RunMetadata:
     baseline_model: str
     max_tokens: int
     temperature: float
-    ollama_url: str
+    providers: list[str]
     # Not named `platform`: a field of that name would shadow the module inside
     # the class body and break the default_factory below.
     os_platform: str = field(default_factory=platform.platform)
@@ -94,12 +94,12 @@ class EvalRunner:
     def __init__(
         self,
         settings: Settings,
-        prices: PriceTable,
+        catalog: ModelCatalog,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         temperature: float = 0.0,
     ) -> None:
         self._settings = settings
-        self._prices = prices
+        self._prices = catalog
         self._max_tokens = max_tokens
         # Zero temperature so a re-run reproduces the same answers. Comparing
         # strategies against a moving target would be meaningless.
@@ -123,12 +123,14 @@ class EvalRunner:
             baseline_model=self._prices.baseline_model,
             max_tokens=self._max_tokens,
             temperature=self._temperature,
-            ollama_url=self._settings.ollama_base_url,
+            providers=sorted(
+                p.id for p in self._prices.enabled_providers()
+            ),
         )
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         results: list[TaskResult] = []
-        provider = OllamaProvider(self._settings)
+        pool = ProviderPool(self._prices, local_only=self._settings.local_only)
 
         try:
             with output_path.open("w", encoding="utf-8") as stream:
@@ -141,7 +143,7 @@ class EvalRunner:
                     # counts are comparable between them.
                     self._last_model = None
                     for task in taskset:
-                        result = await self._run_one(provider, strategy, task)
+                        result = await self._run_one(pool, strategy, task)
                         results.append(result)
                         stream.write(
                             json.dumps(asdict(result), ensure_ascii=False) + "\n"
@@ -150,13 +152,13 @@ class EvalRunner:
                         if progress is not None:
                             progress(result)
         finally:
-            await provider.aclose()
+            await pool.aclose()
 
         metadata.finished_at = _now_iso()
         return results, metadata
 
     async def _run_one(
-        self, provider: OllamaProvider, strategy: RoutingStrategy, task: Task
+        self, pool: ProviderPool, strategy: RoutingStrategy, task: Task
     ) -> TaskResult:
         context = RoutingContext(
             messages=[{"role": "user", "content": task.prompt}]
@@ -178,6 +180,7 @@ class EvalRunner:
 
         started = asyncio.get_running_loop().time()
         try:
+            provider: Provider = pool.for_model(decision.model)
             response = await provider.chat_completion(payload)
         except ProviderUnavailable as exc:
             return self._failed(strategy, task, decision, switched, str(exc))

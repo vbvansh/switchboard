@@ -231,9 +231,9 @@ def test_prompts_stored_when_enabled(ledger: LedgerService) -> None:
 
 
 def test_prompts_withheld_when_disabled(database) -> None:
-    from switchboard.pricing import PriceTable
+    from switchboard.catalog import ModelCatalog
 
-    private = LedgerService(database, PriceTable.load(), store_prompts=False)
+    private = LedgerService(database, ModelCatalog.load(), store_prompts=False)
     user = private.authenticate(private.create_user("bob", 50.0).api_key)
     entry = private.record(
         user_id=user.id,

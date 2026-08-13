@@ -1,11 +1,14 @@
-"""OpenAI-compatible HTTP surface, now metered.
+"""OpenAI-compatible HTTP surface.
 
 Request lifecycle:
 
-    identify (401) -> budget check (402) -> serve -> measure -> record -> reply
+    identify (401) -> budget check (402) -> pick model -> find its provider
+    -> serve -> measure -> record -> reply
 
-Milestone 2 scope: identity, budgets, and accounting. Model choice is still
-fixed - `_resolve_model` is the seam the milestone 4 router plugs into.
+Model choice is still fixed: `_resolve_model` is the seam the router plugs into.
+What changed in A.2 is that the chosen model is now looked up in the catalog to
+find which provider serves it, instead of everything going to one hardcoded
+Ollama client.
 
 The request body is deliberately not schema-validated. Passing it through keeps
 compatibility with OpenAI client features this code does not model; only the
@@ -22,6 +25,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from switchboard.catalog import ModelCatalog
 from switchboard.config import AUTO_MODEL, settings
 from switchboard.ledger import (
     STATUS_BLOCKED_BUDGET,
@@ -35,15 +39,9 @@ from switchboard.ledger import (
 )
 from switchboard.ledger.keys import extract_bearer_token
 from switchboard.ledger.service import estimate_tokens
-from switchboard.pricing import PriceTable
-from switchboard.providers.ollama import OllamaProvider, ProviderUnavailable
+from switchboard.providers import Provider, ProviderPool, ProviderUnavailable
 from switchboard.schema import require_up_to_date
 from switchboard.streaming import UsageSniffer, request_usage_in_stream
-
-PROVIDER_DOWN_DETAIL = (
-    "Cannot reach Ollama at {url}. Start it with `ollama serve` "
-    "(or launch the Ollama desktop app) and try again."
-)
 
 
 @asynccontextmanager
@@ -53,23 +51,24 @@ async def lifespan(app: FastAPI):
     # request, with an error pointing somewhere unhelpful.
     require_up_to_date(settings.database_url)
 
+    catalog = ModelCatalog.load(settings.providers_file)
     database = Database(settings.database_url)
-    prices = PriceTable.load(settings.prices_file)
 
-    app.state.provider = OllamaProvider(settings)
+    app.state.catalog = catalog
+    app.state.pool = ProviderPool(catalog, local_only=settings.local_only)
     app.state.database = database
-    app.state.ledger = LedgerService(database, prices, settings.store_prompts)
+    app.state.ledger = LedgerService(database, catalog, settings.store_prompts)
     try:
         yield
     finally:
-        await app.state.provider.aclose()
+        await app.state.pool.aclose()
         database.dispose()
 
 
 app = FastAPI(
     title="Switchboard",
-    description="Local-only AI model router. No API keys, no remote providers.",
-    version="0.2.0",
+    description="Self-hostable AI model router with an auditable savings ledger.",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -84,14 +83,6 @@ def _error(status: int, message: str, kind: str) -> JSONResponse:
     )
 
 
-def _provider_down() -> JSONResponse:
-    return _error(
-        503,
-        PROVIDER_DOWN_DETAIL.format(url=settings.ollama_base_url),
-        "provider_unavailable",
-    )
-
-
 def _identify(request: Request) -> User:
     """Resolve the caller. Raises AuthenticationError."""
     token = extract_bearer_token(request.headers.get("authorization"))
@@ -101,8 +92,8 @@ def _identify(request: Request) -> User:
 def _resolve_model(payload: dict[str, Any]) -> str:
     """Decide which model serves this request.
 
-    Milestone 2 still returns the fixed default for `auto`. This function is the
-    single seam the routing strategies replace in milestone 4.
+    Still returns the fixed default for `auto`. This function is the single
+    seam the routing strategies replace.
     """
     requested = payload.get("model")
     if not requested or requested == AUTO_MODEL:
@@ -129,11 +120,11 @@ def _prompt_text(messages: Any) -> str:
     """Flatten messages to text, for token estimation only."""
     if not isinstance(messages, list):
         return ""
-    parts = []
-    for message in messages:
-        if isinstance(message, dict) and isinstance(message.get("content"), str):
-            parts.append(message["content"])
-    return "\n".join(parts)
+    return "\n".join(
+        message["content"]
+        for message in messages
+        if isinstance(message, dict) and isinstance(message.get("content"), str)
+    )
 
 
 # --- Endpoints -------------------------------------------------------------
@@ -142,37 +133,65 @@ def _prompt_text(messages: Any) -> str:
 @app.get("/health")
 async def health(request: Request) -> dict[str, Any]:
     """Open by design - a health check that needs credentials is useless."""
+    pool: ProviderPool = request.app.state.pool
+    catalog: ModelCatalog = request.app.state.catalog
+    provider_health = await pool.health()
+
     return {
-        "status": "ok",
-        "provider_reachable": await request.app.state.provider.is_healthy(),
-        "provider_url": settings.ollama_base_url,
+        "status": "ok" if any(provider_health.values()) else "degraded",
+        "providers": provider_health,
+        "unconfigured_providers": pool.unconfigured(),
+        "available_models": pool.available_models(),
         "default_model": settings.default_model,
+        "local_only": settings.local_only,
         "store_prompts": settings.store_prompts,
+        "simulated_pricing": catalog.has_simulated_pricing,
     }
 
 
 @app.get("/v1/models")
 async def list_models(request: Request) -> Response:
+    """Every model this Switchboard can actually serve, OpenAI-shaped.
+
+    Built from the catalog rather than proxied from one upstream, because with
+    several providers there is no single upstream to ask.
+    """
     try:
         _identify(request)
     except AuthenticationError as exc:
         return _error(401, str(exc), "authentication_error")
 
-    try:
-        upstream = await request.app.state.provider.list_models()
-    except ProviderUnavailable:
-        return _provider_down()
-    return Response(
-        content=upstream.content,
-        status_code=upstream.status_code,
-        media_type="application/json",
+    pool: ProviderPool = request.app.state.pool
+    catalog: ModelCatalog = request.app.state.catalog
+
+    return JSONResponse(
+        {
+            "object": "list",
+            "data": [
+                {
+                    "id": model_id,
+                    "object": "model",
+                    "owned_by": catalog.models[model_id].provider_id,
+                    "switchboard": {
+                        "tier": catalog.models[model_id].tier,
+                        "input_per_mtok": catalog.models[model_id].input_per_mtok,
+                        "output_per_mtok": catalog.models[model_id].output_per_mtok,
+                        "context_window": catalog.models[model_id].context_window,
+                        "simulated_pricing": catalog.models[
+                            model_id
+                        ].simulated_pricing,
+                    },
+                }
+                for model_id in pool.available_models()
+            ],
+        }
     )
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request) -> Response:
     ledger: LedgerService = request.app.state.ledger
-    provider: OllamaProvider = request.app.state.provider
+    pool: ProviderPool = request.app.state.pool
 
     try:
         payload: dict[str, Any] = await request.json()
@@ -188,24 +207,33 @@ async def chat_completions(request: Request) -> Response:
     served_model = _resolve_model(payload)
     messages = payload.get("messages")
 
-    try:
-        ledger.assert_within_budget(user)
-    except BudgetExceededError as exc:
-        # Recorded so a blocked attempt is visible in the ledger. Costs zero and
-        # is excluded from spend totals, so retrying cannot dig a deeper hole.
+    def record(status: str, **kwargs) -> None:
         ledger.record(
             user_id=user.id,
             requested_model=requested_model,
             served_model=served_model,
+            tokens_estimated=False,
             prompt_tokens=0,
             completion_tokens=0,
-            tokens_estimated=False,
             latency_ms=0,
-            status=STATUS_BLOCKED_BUDGET,
-            error_detail=str(exc),
+            status=status,
             messages=messages,
+            **kwargs,
         )
+
+    try:
+        ledger.assert_within_budget(user)
+    except BudgetExceededError as exc:
+        # Recorded so a blocked attempt is visible. Costs zero and is excluded
+        # from spend totals, so retrying cannot dig a deeper hole.
+        record(STATUS_BLOCKED_BUDGET, error_detail=str(exc))
         return _error(402, str(exc), "insufficient_quota")
+
+    try:
+        provider = pool.for_model(served_model)
+    except ProviderUnavailable as exc:
+        record(STATUS_PROVIDER_ERROR, error_detail=str(exc))
+        return _error(503, str(exc), "provider_unavailable")
 
     payload["model"] = served_model
     started = time.perf_counter()
@@ -225,19 +253,11 @@ async def chat_completions(request: Request) -> Response:
     try:
         upstream = await provider.chat_completion(payload)
     except ProviderUnavailable as exc:
-        ledger.record(
-            user_id=user.id,
-            requested_model=requested_model,
-            served_model=served_model,
-            prompt_tokens=0,
-            completion_tokens=0,
-            tokens_estimated=False,
-            latency_ms=int((time.perf_counter() - started) * 1000),
-            status=STATUS_PROVIDER_ERROR,
+        record(
+            STATUS_PROVIDER_ERROR,
             error_detail=str(exc),
-            messages=messages,
         )
-        return _provider_down()
+        return _error(503, str(exc), "provider_unavailable")
 
     latency_ms = int((time.perf_counter() - started) * 1000)
     usage = _usage_from_body(upstream.content)
@@ -257,9 +277,7 @@ async def chat_completions(request: Request) -> Response:
         completion_tokens=completion_tokens,
         tokens_estimated=estimated,
         latency_ms=latency_ms,
-        status=(
-            STATUS_OK if upstream.status_code < 400 else STATUS_PROVIDER_ERROR
-        ),
+        status=STATUS_OK if upstream.status_code < 400 else STATUS_PROVIDER_ERROR,
         error_detail=None if upstream.status_code < 400 else upstream.text[:500],
         messages=messages,
     )
@@ -274,7 +292,7 @@ async def chat_completions(request: Request) -> Response:
 async def _serve_streaming(
     *,
     payload: dict[str, Any],
-    provider: OllamaProvider,
+    provider: Provider,
     ledger: LedgerService,
     user: User,
     requested_model: str,
@@ -302,7 +320,7 @@ async def _serve_streaming(
             error_detail=str(exc),
             messages=messages,
         )
-        return _provider_down()
+        return _error(503, str(exc), "provider_unavailable")
     except StopAsyncIteration:
         first_chunk = b""
 

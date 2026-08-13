@@ -10,9 +10,10 @@ from rich.console import Console
 from rich.table import Table
 
 from switchboard import schema
+from switchboard.catalog import CatalogError, ModelCatalog
 from switchboard.config import settings
 from switchboard.ledger import Database, LedgerError, LedgerService
-from switchboard.pricing import PriceTable
+from switchboard.providers import LocalOnlyViolation, ProviderPool
 from switchboard.schema import SchemaOutOfDate, require_up_to_date
 
 cli = typer.Typer(add_completion=False, help="Switchboard - local AI model router.")
@@ -36,7 +37,7 @@ def _ledger(require_schema: bool = True) -> LedgerService:
 
     database = Database(settings.database_url)
     return LedgerService(
-        database, PriceTable.load(settings.prices_file), settings.store_prompts
+        database, ModelCatalog.load(settings.providers_file), settings.store_prompts
     )
 
 
@@ -105,9 +106,15 @@ def serve(
     reload: bool = typer.Option(False, "--reload", help="Auto-reload on edits."),
 ) -> None:
     """Run the OpenAI-compatible proxy."""
-    console.print(f"[bold]Switchboard[/bold] -> {settings.ollama_base_url}")
+    catalog = _catalog()
+    enabled = ", ".join(p.id for p in catalog.enabled_providers()) or "(none)"
+
+    console.print("[bold]Switchboard[/bold]")
+    console.print(f"Providers:     [cyan]{enabled}[/cyan]")
     console.print(f"Default model: [cyan]{settings.default_model}[/cyan]")
     console.print(f"Ledger:        [cyan]{settings.database_url}[/cyan]")
+    if settings.local_only:
+        console.print("[green]Local-only mode ON[/green] - no prompt leaves this host")
     if settings.store_prompts:
         console.print(
             "[yellow]Prompt text IS being stored[/yellow] (store_prompts=true)"
@@ -116,35 +123,129 @@ def serve(
     uvicorn.run("switchboard.api:app", host=host, port=port, reload=reload)
 
 
-@cli.command()
-def check() -> None:
-    """Verify Ollama is reachable and list the models available as tiers."""
-    import httpx
-
-    prices = PriceTable.load(settings.prices_file)
+def _catalog() -> ModelCatalog:
     try:
-        response = httpx.get(f"{settings.openai_compat_url}/models", timeout=10.0)
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        console.print(f"[red]Cannot reach Ollama[/red] at {settings.ollama_base_url}")
-        console.print(f"  {exc}")
+        return ModelCatalog.load(settings.providers_file)
+    except CatalogError as exc:
+        console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
 
-    models = sorted(m["id"] for m in response.json().get("data", []))
-    console.print(f"[green]Ollama reachable[/green] - {len(models)} model(s):")
-    for name in models:
-        price = prices.for_model(name)
-        flags = []
-        if name == settings.default_model:
-            flags.append("default")
-        if name == prices.baseline_model:
-            flags.append("baseline")
-        suffix = f" [dim]({', '.join(flags)})[/dim]" if flags else ""
-        console.print(
-            f"  {price.tier:<8} {name:<28} "
-            f"[dim]${price.input_per_mtok:.2f}/${price.output_per_mtok:.2f} "
-            f"per Mtok (simulated)[/dim]{suffix}"
+
+@cli.command()
+def providers() -> None:
+    """Show configured providers and the models they offer."""
+    catalog = _catalog()
+    console.print(f"Catalog: [cyan]{settings.providers_file}[/cyan]")
+    if settings.local_only:
+        console.print("[yellow]Local-only mode is ON[/yellow] - remote providers "
+                      "will be refused at startup.\n")
+
+    table = Table(title="Providers")
+    table.add_column("Provider")
+    table.add_column("Type")
+    table.add_column("Endpoint")
+    table.add_column("Models", justify="right")
+    table.add_column("State")
+
+    for spec in catalog.providers.values():
+        if not spec.enabled:
+            state = "[dim]disabled[/dim]"
+        elif not spec.key_is_available:
+            state = f"[red]no key ({spec.api_key_env})[/red]"
+        elif spec.is_local:
+            state = "[green]enabled, local[/green]"
+        else:
+            state = "[green]enabled, remote[/green]"
+
+        table.add_row(
+            spec.id, spec.type, spec.base_url, str(len(spec.model_ids)), state
         )
+    console.print(table)
+
+    models = Table(title="Models")
+    models.add_column("Tier")
+    models.add_column("Model")
+    models.add_column("Provider")
+    models.add_column("In $/Mtok", justify="right")
+    models.add_column("Out $/Mtok", justify="right")
+    models.add_column("Notes")
+
+    for model_id in catalog.known_models():
+        spec = catalog.models[model_id]
+        notes = []
+        if model_id in catalog.ladder:
+            notes.append(f"ladder #{catalog.ladder.index(model_id)}")
+        if model_id == catalog.baseline_model:
+            notes.append("baseline")
+        if model_id == settings.default_model:
+            notes.append("default")
+        if spec.emits_thinking:
+            notes.append("thinking")
+        models.add_row(
+            spec.tier,
+            model_id,
+            spec.provider_id,
+            f"{spec.input_per_mtok:.2f}",
+            f"{spec.output_per_mtok:.2f}",
+            ", ".join(notes),
+        )
+    console.print(models)
+
+    if catalog.has_simulated_pricing:
+        console.print(
+            "[yellow]Some enabled providers use SIMULATED pricing.[/yellow] "
+            "Cost and savings figures are illustrative, not real money."
+        )
+
+
+@cli.command()
+def check() -> None:
+    """Verify every enabled provider is reachable."""
+    import asyncio
+
+    catalog = _catalog()
+    try:
+        pool = ProviderPool(catalog, local_only=settings.local_only)
+    except LocalOnlyViolation as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    # Read everything off the pool before closing it: aclose() drops the
+    # provider clients, and available_models() is derived from them.
+    available = pool.available_models()
+    unconfigured = pool.unconfigured()
+
+    async def probe() -> dict[str, bool]:
+        try:
+            return await pool.health()
+        finally:
+            await pool.aclose()
+
+    health = asyncio.run(probe())
+
+    if not health:
+        console.print(
+            "[red]No usable providers.[/red] Enable one in providers.yaml and "
+            "make sure its API key environment variable is set."
+        )
+        raise typer.Exit(code=1)
+
+    failures = 0
+    for provider_id, healthy in sorted(health.items()):
+        spec = catalog.providers[provider_id]
+        if healthy:
+            console.print(f"  [green]OK  [/green] {provider_id:<16} {spec.base_url}")
+        else:
+            failures += 1
+            console.print(f"  [red]DOWN[/red] {provider_id:<16} {spec.base_url}")
+
+    for provider_id, reason in unconfigured.items():
+        console.print(f"  [yellow]SKIP[/yellow] {provider_id:<16} {reason}")
+
+    console.print(f"\n{len(available)} model(s) available: {', '.join(available)}")
+
+    if failures:
+        raise typer.Exit(code=1)
 
 
 # --- Users -----------------------------------------------------------------
@@ -258,7 +359,7 @@ def usage() -> None:
     console.print(table)
     console.print(
         "[dim]'Baseline' is what these requests would have cost on "
-        f"{PriceTable.load(settings.prices_file).baseline_model}. "
+        f"{_catalog().baseline_model}. "
         "No real money is involved.[/dim]"
     )
 
@@ -315,11 +416,11 @@ def eval_run(
     from eval.runner import EvalRunner
     from switchboard.routing import build_strategy
 
-    prices = PriceTable.load(settings.prices_file)
+    catalog = _catalog()
     names = [n.strip() for n in strategies.split(",") if n.strip()]
 
     try:
-        chosen = [build_strategy(name, prices) for name in names]
+        chosen = [build_strategy(name, catalog) for name in names]
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
@@ -336,9 +437,9 @@ def eval_run(
         f"Running [cyan]{len(tasks)}[/cyan] tasks x "
         f"[cyan]{len(chosen)}[/cyan] strategies = [bold]{total}[/bold] generations"
     )
-    console.print(f"Ladder: {' -> '.join(prices.ladder)}\n")
+    console.print(f"Ladder: {' -> '.join(catalog.ladder)}\n")
 
-    runner = EvalRunner(settings, prices, max_tokens=max_tokens)
+    runner = EvalRunner(settings, catalog, max_tokens=max_tokens)
     output = Path(out)
 
     with Progress(
