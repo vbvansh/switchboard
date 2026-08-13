@@ -42,6 +42,10 @@ numpy>=1.26
 # --- Ledger: users, budgets, credit accounting ----------------------------
 SQLAlchemy>=2.0
 
+# Schema migrations. Required, not optional: without it, upgrading Switchboard
+# means deleting the user's database. See migrations/ and switchboard/schema.py.
+alembic>=1.14
+
 # --- Offline evaluation & analysis ----------------------------------------
 pandas>=2.2
 datasets>=3.0          # pulls RouterBench / GSM8K / HumanEval from HuggingFace

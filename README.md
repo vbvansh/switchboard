@@ -58,6 +58,17 @@ pip freeze > requirements.lock.txt
 copy .env.example .env
 ```
 
+Create the database:
+
+```powershell
+python -m switchboard db upgrade
+```
+
+Run this after every upgrade of Switchboard too. It applies any schema changes
+without touching your data, and it is safe to run when nothing has changed.
+Switchboard refuses to start against a database it does not recognise rather
+than failing confusingly later.
+
 Ollama must be running. Confirm it and see the available tiers with prices:
 
 ```powershell
@@ -123,11 +134,43 @@ separately and never mixed with the simulated dollars.
 
 ## Privacy
 
-`store_prompts` defaults to **on**: the full `messages` array of every request
-is written to the database, because milestone 4's router needs real examples to
-learn from. That means the database holds whatever users typed. It is excluded
-from git. Set `SWITCHBOARD_STORE_PROMPTS=false` to keep only token counts and
-costs.
+**Switchboard does not store prompt text by default.** Only token counts, costs,
+timings, and which model served each request are recorded.
+
+Storing prompt text is available and useful — the routing classifier learns from
+real examples — but it means the database holds whatever your users type, which
+in most organisations includes customer data and credentials. So it is an
+explicit opt-in:
+
+```
+SWITCHBOARD_STORE_PROMPTS=true
+```
+
+If you turn it on: tell your users, protect the database file, and check what
+your local data-protection rules require. The database is excluded from git.
+
+## Database upgrades
+
+Schema changes ship as migrations under [`migrations/`](migrations/). Upgrading
+Switchboard never requires deleting your data:
+
+```powershell
+python -m switchboard db status     # what revision am I on?
+python -m switchboard db upgrade    # apply anything missing
+```
+
+If you have a database created before migrations existed, its tables are already
+correct — record that fact without re-creating them:
+
+```powershell
+python -m switchboard db stamp-baseline
+```
+
+## Licence
+
+Apache 2.0 — see [LICENSE](LICENSE). You may use, modify, and redistribute this
+commercially. The licence includes a patent grant, which is why companies tend
+to prefer it over MIT.
 
 ## Tests
 

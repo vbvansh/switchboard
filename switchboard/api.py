@@ -37,6 +37,7 @@ from switchboard.ledger.keys import extract_bearer_token
 from switchboard.ledger.service import estimate_tokens
 from switchboard.pricing import PriceTable
 from switchboard.providers.ollama import OllamaProvider, ProviderUnavailable
+from switchboard.schema import require_up_to_date
 from switchboard.streaming import UsageSniffer, request_usage_in_stream
 
 PROVIDER_DOWN_DETAIL = (
@@ -47,8 +48,12 @@ PROVIDER_DOWN_DETAIL = (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Refuse to start against a database shaped differently to what this code
+    # expects. Starting anyway does not fail cleanly - it fails later, mid
+    # request, with an error pointing somewhere unhelpful.
+    require_up_to_date(settings.database_url)
+
     database = Database(settings.database_url)
-    database.create_all()
     prices = PriceTable.load(settings.prices_file)
 
     app.state.provider = OllamaProvider(settings)

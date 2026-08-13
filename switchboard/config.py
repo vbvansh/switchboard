@@ -50,11 +50,18 @@ class Settings(BaseSettings):
     # --- Ledger -------------------------------------------------------------
     database_url: str = "sqlite:///data/switchboard.db"
 
-    # Store the full `messages` array of every request. Needed as training data
-    # for the milestone 4 router, but it means the database holds whatever
-    # users typed. The database file is gitignored. Turn this off to keep only
-    # token counts and costs.
-    store_prompts: bool = True
+    # Store the full `messages` array of every request.
+    #
+    # OFF by default, and it must stay that way. Turning it on means the
+    # database records everything users type - which in a real deployment
+    # includes customer data, credentials, and personal information, with the
+    # legal exposure that carries. Nobody should acquire that liability by
+    # installing software and leaving the defaults alone.
+    #
+    # It is genuinely useful: the routing classifier learns from real examples.
+    # So it stays available, as a deliberate opt-in the operator has to read
+    # about and choose. Safe by default, useful on request.
+    store_prompts: bool = False
 
     # Simulated price table. Lives in git so price changes appear in a diff.
     prices_file: str = str(Path(__file__).parent / "prices.json")

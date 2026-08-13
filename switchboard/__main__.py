@@ -9,24 +9,89 @@ import uvicorn
 from rich.console import Console
 from rich.table import Table
 
+from switchboard import schema
 from switchboard.config import settings
 from switchboard.ledger import Database, LedgerError, LedgerService
 from switchboard.pricing import PriceTable
+from switchboard.schema import SchemaOutOfDate, require_up_to_date
 
 cli = typer.Typer(add_completion=False, help="Switchboard - local AI model router.")
 users_cli = typer.Typer(help="Manage developers and their budgets.")
 eval_cli = typer.Typer(help="Measure routing strategies against known answers.")
+db_cli = typer.Typer(help="Database schema management.")
 cli.add_typer(users_cli, name="users")
 cli.add_typer(eval_cli, name="eval")
+cli.add_typer(db_cli, name="db")
 
 console = Console()
 
 
-def _ledger() -> LedgerService:
+def _ledger(require_schema: bool = True) -> LedgerService:
+    if require_schema:
+        try:
+            require_up_to_date(settings.database_url)
+        except SchemaOutOfDate as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from exc
+
     database = Database(settings.database_url)
-    database.create_all()
     return LedgerService(
         database, PriceTable.load(settings.prices_file), settings.store_prompts
+    )
+
+
+# --- Database --------------------------------------------------------------
+
+
+@db_cli.command("status")
+def db_status() -> None:
+    """Show whether the database schema matches this version of the code."""
+    state = schema.status(settings.database_url)
+    colour = "green" if state.up_to_date else "yellow"
+    console.print(f"Database: [cyan]{settings.database_url}[/cyan]")
+    console.print(f"Schema:   [{colour}]{state.describe()}[/{colour}]")
+    if not state.up_to_date:
+        console.print(
+            "\nRun [cyan]switchboard db upgrade[/cyan] to bring it up to date."
+        )
+
+
+@db_cli.command("upgrade")
+def db_upgrade() -> None:
+    """Create or update the database schema.
+
+    Safe to run repeatedly - migrations already applied are skipped.
+    """
+    before = schema.status(settings.database_url)
+    if before.up_to_date:
+        console.print(f"[green]Already up to date[/green] (revision {before.head})")
+        return
+
+    console.print(f"Upgrading {settings.database_url}")
+    console.print(f"  {before.describe()}")
+    schema.upgrade(settings.database_url)
+    console.print(f"[green]Done[/green] - now at revision {schema.head_revision()}")
+
+
+@db_cli.command("stamp-baseline")
+def db_stamp_baseline() -> None:
+    """Mark an existing pre-migrations database as being at the first revision.
+
+    For databases created before migrations existed. Their tables are already
+    the right shape, so running the first migration would fail on "table
+    already exists". This records the version without touching any data.
+    """
+    state = schema.status(settings.database_url)
+    if not state.unmanaged:
+        console.print(
+            f"[yellow]Nothing to do[/yellow] - already stamped at {state.current}."
+        )
+        return
+
+    schema.stamp(settings.database_url, "0001")
+    console.print(
+        f"[green]Stamped[/green] {settings.database_url} at revision 0001.\n"
+        "Now run [cyan]switchboard db upgrade[/cyan] to apply anything newer."
     )
 
 
