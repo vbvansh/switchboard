@@ -1,72 +1,47 @@
 # ---------------------------------------------------------------------------
-# Switchboard - AI Model Router
-# Python 3.11 | 100% local inference via Ollama | no paid APIs, no signups
+# Switchboard - runtime dependencies
+#
+# This is what the server needs to run, and what the Docker image installs.
+# Evaluation, plotting and machine-learning packages live in
+# requirements-dev.txt: they are large (PyTorch-adjacent, ~500MB) and a
+# production container should not carry tools it never runs.
 #
 #   python -m venv .venv
 #   .\.venv\Scripts\Activate.ps1
-#   python -m pip install --upgrade pip
-#   pip install -r requirements.txt
+#   pip install -r requirements.txt -r requirements-dev.txt
 #
-# Versions below are FLOORS (>=), not pins - deliberately, because pinning
-# versions that were never installed is guesswork. After the first successful
-# install run:
-#       pip freeze > requirements.lock.txt
-# and commit the lock file. Benchmark numbers are only comparable across weeks
-# if the dependency tree is frozen.
+# Versions are FLOORS (>=). After a successful install, freeze them:
+#   pip freeze > requirements.lock.txt
+# Benchmark numbers are only comparable across weeks if the tree is frozen.
 # ---------------------------------------------------------------------------
 
-# --- Router service: OpenAI-compatible proxy ------------------------------
+# --- HTTP service ---------------------------------------------------------
 fastapi>=0.115
 uvicorn[standard]>=0.32
 pydantic>=2.9
 pydantic-settings>=2.6
-httpx>=0.27
 python-dotenv>=1.0
 
-# --- LLM clients ----------------------------------------------------------
-# Ollama serves an OpenAI-compatible API at http://localhost:11434/v1, so the
-# `openai` package is used purely as a local HTTP client. No API key is set,
-# no request leaves this machine. `ollama` is used for model management
-# (list / pull / warm-load control).
-openai>=1.60
-ollama>=0.4
+# --- Talking to providers -------------------------------------------------
+# Every provider adapter is built on httpx. The `openai` and `ollama` client
+# packages were removed in A.2: providers are now reached over plain HTTP
+# through switchboard/providers/, so those wrappers earned nothing.
+httpx>=0.27
 
-# --- Routing brain: complexity classification -----------------------------
-# fastembed = ONNX embeddings, CPU-only, ~50MB of runtime. Chosen over
-# sentence-transformers specifically to avoid dragging ~2.5GB of PyTorch onto
-# a 7.3GB-RAM machine. Swap it later if you ever get more headroom.
-fastembed>=0.4
-scikit-learn>=1.5
-numpy>=1.26
+# --- Provider catalog -----------------------------------------------------
+PyYAML>=6.0
 
-# --- Ledger: users, budgets, credit accounting ----------------------------
+# --- Ledger ---------------------------------------------------------------
 SQLAlchemy>=2.0
 
 # Schema migrations. Required, not optional: without it, upgrading Switchboard
 # means deleting the user's database. See migrations/ and switchboard/schema.py.
 alembic>=1.14
 
-# --- Offline evaluation & analysis ----------------------------------------
-pandas>=2.2
-datasets>=3.0          # pulls RouterBench / GSM8K / HumanEval from HuggingFace
-matplotlib>=3.9        # cost-vs-quality Pareto curves
-tabulate>=0.9
+# PostgreSQL driver. SQLite is the default and needs nothing extra, but a team
+# sharing one Switchboard needs a real database server.
+psycopg[binary]>=3.2
 
 # --- CLI ------------------------------------------------------------------
 typer>=0.15
 rich>=13.9
-
-# --- Dev ------------------------------------------------------------------
-pytest>=8.3
-pytest-asyncio>=0.24
-ruff>=0.7
-mypy>=1.13
-
-# ---------------------------------------------------------------------------
-# Deliberately NOT included:
-#   anthropic / google-generativeai  - no paid or remote providers
-#   torch / sentence-transformers    - too heavy for 7.3GB RAM (see fastembed)
-#   presidio-analyzer                - good PII detection, but needs spaCy +
-#                                      large models; revisit only if the regex
-#                                      + embedding guardrail proves too weak
-# ---------------------------------------------------------------------------

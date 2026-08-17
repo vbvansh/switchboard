@@ -52,17 +52,46 @@ evicts the warm set and the *next* few cheap requests pay a reload penalty too.
 The router accounts for warm/cold state rather than pretending model choice is
 free. This mirrors GPU-pool locality behaviour in real serving stacks.
 
-## Setup
+## Run with Docker
+
+```bash
+docker compose up --build
+```
+
+That builds the image, applies database migrations, and starts the server on
+`http://localhost:8000`. It talks to an Ollama running on your host machine.
+
+```bash
+curl http://localhost:8000/health
+```
+
+To use PostgreSQL instead of the default SQLite file:
+
+```bash
+docker compose --profile postgres up --build
+```
+
+then set `SWITCHBOARD_DATABASE_URL` on the switchboard service to
+`postgresql+psycopg://switchboard:switchboard@postgres:5432/switchboard`.
+
+The ledger lives in a named volume. Without it, replacing the container would
+destroy every user, budget and spending record.
+
+## Run from source
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-dev.txt
 pip freeze > requirements.lock.txt
 
 copy .env.example .env
 ```
+
+`requirements.txt` is what the server needs. `requirements-dev.txt` adds tests
+and the evaluation harness, which pull in a large scientific stack the running
+server never uses — which is why the container image ships without them.
 
 Create the database:
 
@@ -142,6 +171,26 @@ print(response.choices[0].message.content)
 milestone 4 it triggers a real routing decision. An explicit model name is
 always honoured, which is what makes per-tier benchmarking possible.
 
+### From PowerShell
+
+Use `Invoke-RestMethod` rather than `curl`. PowerShell rewrites arguments before
+they reach `curl.exe`, so JSON bodies with escaped quotes arrive corrupted —
+a confusing failure that looks like a server bug and is not one.
+
+```powershell
+$key  = "sk-swbd-..."
+$body = @{
+  model    = "auto"
+  messages = @(@{ role = "user"; content = "What is 17 + 28?" })
+} | ConvertTo-Json -Depth 5
+
+$r = Invoke-RestMethod -Uri "http://localhost:8000/v1/chat/completions" `
+     -Method Post -Headers @{ Authorization = "Bearer $key" } `
+     -ContentType "application/json" -Body $body -TimeoutSec 300
+
+$r.choices[0].message.content
+```
+
 ## Admin
 
 ```powershell
@@ -182,6 +231,19 @@ SWITCHBOARD_STORE_PROMPTS=true
 
 If you turn it on: tell your users, protect the database file, and check what
 your local data-protection rules require. The database is excluded from git.
+
+## Health endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `/health/live` | Is the process alive? Checks nothing else. |
+| `/health/ready` | Can it serve traffic? 503 if the database or every provider is down. |
+| `/health` | Detailed status for a human. |
+
+The split matters under an orchestrator. A failing **liveness** probe causes a
+restart; a failing **readiness** probe only stops traffic being routed to the
+instance. If liveness checked providers, a provider outage would restart
+Switchboard in a loop — fixing nothing and destroying its own logs.
 
 ## Database upgrades
 

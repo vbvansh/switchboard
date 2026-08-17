@@ -11,7 +11,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -30,7 +31,13 @@ def _sqlite_file_path(url: str) -> Path | None:
 
 
 class Database:
-    def __init__(self, url: str, echo: bool = False) -> None:
+    def __init__(
+        self,
+        url: str,
+        echo: bool = False,
+        pool_size: int = 5,
+        max_overflow: int = 10,
+    ) -> None:
         self.url = url
         is_sqlite = url.startswith("sqlite")
         is_memory = is_sqlite and _sqlite_file_path(url) is None
@@ -43,6 +50,19 @@ class Database:
             # FastAPI serves requests across threads; SQLite objects are
             # otherwise pinned to their creating thread.
             kwargs["connect_args"] = {"check_same_thread": False}
+        else:
+            # Server-backed databases (Postgres) hand out pooled connections
+            # that can be closed underneath us - by an idle timeout, a network
+            # blip, or the server restarting. pool_pre_ping tests a connection
+            # before handing it over and transparently replaces a dead one.
+            # Without it, the first request after any such event fails.
+            kwargs["pool_pre_ping"] = True
+            kwargs["pool_size"] = pool_size
+            kwargs["max_overflow"] = max_overflow
+            # Recycle below the typical 5-minute idle cut-off used by managed
+            # Postgres and connection proxies.
+            kwargs["pool_recycle"] = 280
+
         if is_memory:
             # Without StaticPool every connection gets its own blank in-memory
             # database - which silently breaks tests.
@@ -75,6 +95,23 @@ class Database:
 
     def dispose(self) -> None:
         self.engine.dispose()
+
+    def is_reachable(self) -> bool:
+        """Can we actually talk to the database right now?
+
+        Used by the readiness probe. A configured URL proves nothing - the
+        server may be down, the credentials wrong, or the network gone.
+        """
+        # Broad except is deliberate. This backs a readiness probe, and a probe
+        # that raises turns a clean "not ready" 503 into a 500, which reads as
+        # "the app is broken" rather than "a dependency is down". Any failure
+        # to reach the database means the same thing: not ready.
+        try:
+            with self.engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+        except (SQLAlchemyError, AttributeError, OSError):
+            return False
+        return True
 
 
 def _enable_wal(engine: Engine) -> None:

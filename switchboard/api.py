@@ -130,15 +130,58 @@ def _prompt_text(messages: Any) -> str:
 # --- Endpoints -------------------------------------------------------------
 
 
+@app.get("/health/live")
+async def liveness() -> dict[str, str]:
+    """Is this process alive? Nothing else.
+
+    Deliberately checks no dependency. A failing liveness probe tells an
+    orchestrator to kill and restart the container - so if this checked whether
+    a provider were up, an outage at that provider would put Switchboard into a
+    restart loop, fixing nothing and destroying its own logs. Dependency health
+    belongs in /health/ready.
+    """
+    return {"status": "alive", "version": app.version}
+
+
+@app.get("/health/ready")
+async def readiness(request: Request) -> Response:
+    """Can this process serve traffic right now?
+
+    Returns 503 when it cannot, so a load balancer stops sending it requests
+    while leaving the container running. Two things must hold: the ledger must
+    be writable, and at least one provider must answer.
+    """
+    pool: ProviderPool = request.app.state.pool
+    database: Database = request.app.state.database
+
+    provider_health = await pool.health()
+    database_ok = database.is_reachable()
+    providers_ok = any(provider_health.values())
+
+    ready = database_ok and providers_ok
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={
+            "status": "ready" if ready else "not_ready",
+            "database": database_ok,
+            "providers": provider_health,
+        },
+    )
+
+
 @app.get("/health")
 async def health(request: Request) -> dict[str, Any]:
-    """Open by design - a health check that needs credentials is useless."""
+    """Detailed status for a human. Open by design - a health check that needs
+    credentials is useless to a monitoring system."""
     pool: ProviderPool = request.app.state.pool
     catalog: ModelCatalog = request.app.state.catalog
+    database: Database = request.app.state.database
     provider_health = await pool.health()
 
     return {
         "status": "ok" if any(provider_health.values()) else "degraded",
+        "version": app.version,
+        "database_reachable": database.is_reachable(),
         "providers": provider_health,
         "unconfigured_providers": pool.unconfigured(),
         "available_models": pool.available_models(),

@@ -104,6 +104,11 @@ def serve(
     host: str = typer.Option(settings.host, help="Bind address."),
     port: int = typer.Option(settings.port, help="Bind port."),
     reload: bool = typer.Option(False, "--reload", help="Auto-reload on edits."),
+    graceful_timeout: int = typer.Option(
+        60,
+        help="Seconds to let in-flight requests finish on shutdown. A slow "
+        "local model can take minutes, so the usual 10s cuts real answers off.",
+    ),
 ) -> None:
     """Run the OpenAI-compatible proxy."""
     catalog = _catalog()
@@ -120,7 +125,13 @@ def serve(
             "[yellow]Prompt text IS being stored[/yellow] (store_prompts=true)"
         )
     console.print(f"Point any OpenAI client at [green]http://{host}:{port}/v1[/green]\n")
-    uvicorn.run("switchboard.api:app", host=host, port=port, reload=reload)
+    uvicorn.run(
+        "switchboard.api:app",
+        host=host,
+        port=port,
+        reload=reload,
+        timeout_graceful_shutdown=graceful_timeout,
+    )
 
 
 def _catalog() -> ModelCatalog:
@@ -367,11 +378,32 @@ def usage() -> None:
 # --- Evaluation ------------------------------------------------------------
 
 
+def _require_eval() -> None:
+    """Fail clearly when the evaluation extras are not installed.
+
+    The Docker image ships runtime dependencies only - the evaluation harness
+    pulls in a large scientific stack that a server never uses. A missing
+    import should explain that, not produce a traceback.
+    """
+    try:
+        import eval  # noqa: F401
+    except ImportError as exc:
+        console.print(
+            "[red]The evaluation harness is not available in this "
+            "installation.[/red]\n"
+            "It is excluded from the container image because it needs a large "
+            "set of extra packages.\n"
+            "Install it with: [cyan]pip install -r requirements-dev.txt[/cyan]"
+        )
+        raise typer.Exit(code=1) from exc
+
+
 @eval_cli.command("tasks")
 def eval_tasks(
     taskset: str = typer.Option("builtin", help="Task set name."),
 ) -> None:
     """Show what is in a task set."""
+    _require_eval()
     from eval.datasets import load_taskset
 
     tasks = load_taskset(taskset)
@@ -401,6 +433,7 @@ def eval_run(
     Slow by design on this hardware - the top tier does not fit in VRAM. Results
     stream to disk as they complete, so an interrupted run is not lost.
     """
+    _require_eval()
     import asyncio
 
     from rich.progress import (
@@ -483,6 +516,7 @@ def eval_report(
     plot: bool = typer.Option(True, help="Also render the cost/accuracy chart."),
 ) -> None:
     """Summarise a run: comparison table, per-tier breakdown, and chart."""
+    _require_eval()
     from eval.report import pareto_plot, summarise, to_markdown
     from eval.runner import load_results
 

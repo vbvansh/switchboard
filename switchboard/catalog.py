@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,8 +30,40 @@ KNOWN_PROVIDER_TYPES = frozenset({"openai-compatible"})
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"})
 
 
+#: ${VAR} or ${VAR:-fallback} inside any string value in providers.yaml.
+ENV_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
 class CatalogError(ValueError):
     """providers.yaml is malformed or inconsistent."""
+
+
+def expand_env(value: str) -> str:
+    """Substitute ${VAR} and ${VAR:-fallback} from the environment.
+
+    Exists so one catalog file works in every environment. A base_url of
+    `http://localhost:11434/v1` is correct on a laptop and wrong inside a
+    container, where the host is reached as host.docker.internal. Rather than
+    shipping two files that drift apart, the file states the default and the
+    deployment overrides it.
+
+    An unset variable with no fallback expands to empty, which then fails
+    validation loudly - better than silently pointing at a wrong address.
+    """
+    return ENV_PLACEHOLDER.sub(
+        lambda m: os.environ.get(m.group(1), m.group(2) or ""), value
+    )
+
+
+def _expand_tree(node):
+    """Apply env expansion to every string in a nested structure."""
+    if isinstance(node, str):
+        return expand_env(node)
+    if isinstance(node, dict):
+        return {key: _expand_tree(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_expand_tree(item) for item in node]
+    return node
 
 
 @dataclass(frozen=True)
@@ -121,6 +154,7 @@ class ModelCatalog:
 
     @classmethod
     def from_dict(cls, raw: dict, source: str = "<dict>") -> ModelCatalog:
+        raw = _expand_tree(raw)
         providers: dict[str, ProviderSpec] = {}
         models: dict[str, ModelSpec] = {}
 

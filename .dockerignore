@@ -1,0 +1,53 @@
+# Keep the build context small and secrets out of the image.
+# Everything here is either irrelevant to running the server, enormous, or
+# must never be baked into a distributable image.
+
+# --- Secrets and local state ------------------------------------------------
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Virtualenvs (large, and platform-specific) -----------------------------
+.venv/
+.switchboard/
+venv/
+env/
+
+# --- Python artefacts -------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Development-only trees -------------------------------------------------
+# The runtime image installs requirements.txt only, so the evaluation harness
+# and its heavy dependencies are not present. Copying eval/ in would give a
+# broken import rather than a useful feature.
+eval/
+tests/
+runs/
+results/
+docs/
+
+# --- Repository metadata ----------------------------------------------------
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+
+# --- Docker itself ----------------------------------------------------------
+Dockerfile
+.dockerignore
+docker-compose.yml

@@ -1,0 +1,27 @@
+# ---------------------------------------------------------------------------
+# Switchboard - development and evaluation dependencies
+#
+# Install alongside the runtime requirements:
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Not installed in the Docker image. These are the tools for testing the code
+# and for running the evaluation harness that measures routing quality - both
+# jobs you do while building Switchboard, not while serving traffic.
+# ---------------------------------------------------------------------------
+
+# --- Tests and linting ----------------------------------------------------
+pytest>=8.3
+pytest-asyncio>=0.24
+ruff>=0.7
+mypy>=1.13
+
+# --- Evaluation harness ---------------------------------------------------
+# fastembed: ONNX embeddings, CPU-only, ~50MB. Chosen over sentence-transformers
+# specifically to avoid dragging ~2.5GB of PyTorch in for one small model.
+fastembed>=0.4
+scikit-learn>=1.5
+numpy>=1.26
+pandas>=2.2
+datasets>=3.0          # public routing datasets from HuggingFace
+matplotlib>=3.9        # cost-vs-quality Pareto curves
+tabulate>=0.9

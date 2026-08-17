@@ -1,0 +1,88 @@
+# Switchboard - self-hosted deployment
+#
+#   docker compose up --build                    SQLite, talks to Ollama on the host
+#   docker compose --profile postgres up --build PostgreSQL instead of SQLite
+#
+# Then: http://localhost:8000/health
+
+services:
+  switchboard:
+    build: .
+    image: switchboard:latest
+    ports:
+      - "8000:8000"
+
+    environment:
+      # Reach the host's Ollama from inside the container. `localhost` here
+      # means the container itself, which has no Ollama in it. providers.yaml
+      # reads this variable, so the same file works both ways.
+      OLLAMA_BASE_URL: http://host.docker.internal:11434/v1
+
+      SWITCHBOARD_DATABASE_URL: sqlite:////app/data/switchboard.db
+
+      # Off by default. Turning it on records every prompt your users send.
+      SWITCHBOARD_STORE_PROMPTS: "false"
+
+      # Set to true to guarantee no request leaves this machine. Startup fails
+      # if any enabled provider in providers.yaml is remote.
+      SWITCHBOARD_LOCAL_ONLY: "false"
+
+      # Provider API keys. Uncomment the ones you use and supply them through
+      # a .env file next to this compose file - never commit them.
+      # OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # GROQ_API_KEY: ${GROQ_API_KEY:-}
+
+    volumes:
+      # The ledger. Without this volume, every container replacement destroys
+      # your users, budgets and spending history.
+      - switchboard-data:/app/data
+      # Edit providers.yaml on the host and restart to pick up changes, rather
+      # than rebuilding the image for a config edit.
+      - ./providers.yaml:/app/providers.yaml:ro
+
+    extra_hosts:
+      # Docker Desktop provides host.docker.internal automatically; on Linux it
+      # has to be mapped explicitly. Harmless where it already exists.
+      - "host.docker.internal:host-gateway"
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4).status==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    # Time for in-flight requests to finish before the container is killed.
+    # A slow local model can take minutes to answer, so the default 10s would
+    # cut real requests off mid-generation.
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  # --- Optional PostgreSQL ---------------------------------------------------
+  # Enable with: docker compose --profile postgres up
+  # Then set SWITCHBOARD_DATABASE_URL on the switchboard service to:
+  #   postgresql+psycopg://switchboard:switchboard@postgres:5432/switchboard
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: switchboard
+      POSTGRES_PASSWORD: switchboard    # change this for anything real
+      POSTGRES_DB: switchboard
+    volumes:
+      - switchboard-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U switchboard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  switchboard-data:
+  switchboard-postgres:

@@ -40,7 +40,11 @@ providers:
   # ---------------------------------------------------------------------------
   - id: ollama-local
     type: openai-compatible
-    base_url: http://localhost:11434/v1
+    # ${VAR:-default} is expanded from the environment on load, so this one
+    # file works on a laptop and inside a container. Docker reaches the host's
+    # Ollama as host.docker.internal, not localhost - docker-compose.yml sets
+    # OLLAMA_BASE_URL accordingly.
+    base_url: ${OLLAMA_BASE_URL:-http://localhost:11434/v1}
     enabled: true
     simulated_pricing: true
     timeout_seconds: 600      # a cold 7b load on a small GPU is slow to start
