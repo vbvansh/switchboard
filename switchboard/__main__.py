@@ -20,9 +20,11 @@ cli = typer.Typer(add_completion=False, help="Switchboard - local AI model route
 users_cli = typer.Typer(help="Manage developers and their budgets.")
 eval_cli = typer.Typer(help="Measure routing strategies against known answers.")
 db_cli = typer.Typer(help="Database schema management.")
+bench_cli = typer.Typer(help="Public routing benchmarks: real models, real costs.")
 cli.add_typer(users_cli, name="users")
 cli.add_typer(eval_cli, name="eval")
 cli.add_typer(db_cli, name="db")
+cli.add_typer(bench_cli, name="bench")
 
 console = Console()
 
@@ -595,6 +597,243 @@ def eval_report(
             f"temperature={metadata.get('temperature')}, "
             f"started {metadata.get('started_at')}[/dim]"
         )
+
+
+# --- Benchmarks ------------------------------------------------------------
+
+
+@bench_cli.command("build")
+def bench_build(
+    source: str = typer.Argument(
+        ..., help="llmrouterbench | xroutebench | all"
+    ),
+    rebuild: bool = typer.Option(False, help="Rebuild even if already cached."),
+) -> None:
+    """Normalise a downloaded benchmark into the fast Parquet cache.
+
+    Reading the raw sources takes minutes; the cache loads in seconds. Phase C
+    re-runs experiments constantly, so this is done once up front.
+    """
+    _require_eval()
+    from eval import benchmarks
+
+    wanted = list(benchmarks.SOURCES) if source == "all" else [source]
+
+    for name in wanted:
+        if benchmarks.is_cached(name) and not rebuild:
+            console.print(f"[dim]{name}: already cached (use --rebuild to redo)[/dim]")
+            continue
+
+        console.print(f"Building [cyan]{name}[/cyan] ...")
+        counted = {"n": 0}
+
+        def tick(label: str, count: int, total=counted) -> None:
+            # `total` is bound as a default so the closure captures this
+            # iteration's dict, not whatever the loop variable holds later.
+            total["n"] += count
+            console.print(f"  {label:<28} {count:>8,} rows")
+
+        try:
+            path = benchmarks.build(name, progress=tick)
+        except FileNotFoundError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from exc
+
+        size_mb = path.stat().st_size / 1e6
+        console.print(
+            f"[green]{name}[/green]: {counted['n']:,} rows -> "
+            f"{path} ({size_mb:.1f} MB)\n"
+        )
+
+
+@bench_cli.command("list")
+def bench_list() -> None:
+    """Show which benchmarks are cached and what they contain."""
+    _require_eval()
+    from eval import benchmarks
+
+    table = Table(title="Cached benchmarks")
+    table.add_column("Source")
+    table.add_column("Rows", justify="right")
+    table.add_column("Models", justify="right")
+    table.add_column("Suites", justify="right")
+    table.add_column("Latency?")
+
+    any_cached = False
+    for name in benchmarks.SOURCES:
+        if not benchmarks.is_cached(name):
+            table.add_row(name, "-", "-", "-", "[dim]not built[/dim]")
+            continue
+        any_cached = True
+        frame = benchmarks.load(name)
+        table.add_row(
+            name,
+            f"{len(frame):,}",
+            str(len(frame.models)),
+            str(len(frame.benchmarks)),
+            "[green]yes[/green]" if frame.has_latency else "[dim]no[/dim]",
+        )
+    console.print(table)
+
+    if not any_cached:
+        console.print(
+            "\nNothing cached yet. Download a source, then run:\n"
+            "  [cyan]python scripts/fetch_llmrouterbench.py --extract[/cyan]\n"
+            "  [cyan]switchboard bench build all[/cyan]"
+        )
+
+
+@bench_cli.command("summary")
+def bench_summary(
+    source: str = typer.Argument(..., help="Which cached source to summarise."),
+    by: str = typer.Option("benchmark", help="benchmark | model"),
+    top: int = typer.Option(25, help="Rows to show."),
+) -> None:
+    """Break a cached benchmark down by suite or by model."""
+    _require_eval()
+    from eval import benchmarks
+
+    if not benchmarks.is_cached(source):
+        console.print(
+            f"[red]{source} is not cached.[/red] "
+            f"Run: switchboard bench build {source}"
+        )
+        raise typer.Exit(code=1)
+
+    frame = benchmarks.load(source)
+
+    if by == "model":
+        data = frame.model_summary().head(top)
+        table = Table(title=f"{source}: models")
+        table.add_column("Model")
+        table.add_column("Questions", justify="right")
+        table.add_column("Suites", justify="right")
+        table.add_column("Accuracy", justify="right")
+        table.add_column("Cost", justify="right")
+        table.add_column("Latency", justify="right")
+        for model, row in data.iterrows():
+            latency = (
+                f"{row.mean_latency_s:.2f}s"
+                if row.mean_latency_s == row.mean_latency_s
+                else "-"
+            )
+            table.add_row(
+                str(model),
+                f"{int(row.answered):,}",
+                str(int(row.benchmarks)),
+                f"{row.accuracy:.1%}",
+                f"${row.total_cost:,.2f}",
+                latency,
+            )
+    else:
+        data = frame.summary().head(top)
+        table = Table(title=f"{source}: benchmark suites")
+        table.add_column("Suite")
+        table.add_column("Rows", justify="right")
+        table.add_column("Questions", justify="right")
+        table.add_column("Models", justify="right")
+        table.add_column("Mean score", justify="right")
+        table.add_column("Cost", justify="right")
+        for name, row in data.iterrows():
+            table.add_row(
+                str(name),
+                f"{int(row.rows):,}",
+                f"{int(row.queries):,}",
+                str(int(row.models)),
+                f"{row.mean_score:.1%}",
+                f"${row.total_cost:,.2f}",
+            )
+
+    console.print(table)
+
+
+@bench_cli.command("headroom")
+def bench_headroom(
+    source: str = typer.Argument(..., help="Which cached source to analyse."),
+    suite: str = typer.Option("", help="Restrict to one benchmark suite."),
+    models: str = typer.Option("", help="Comma-separated models to compare."),
+) -> None:
+    """How much could perfect routing win?
+
+    Builds a complete model x question grid, then reports the ceiling (an
+    oracle that always picks a model that answers correctly) against the best
+    and cheapest single models. This is the prize any router is chasing.
+    """
+    _require_eval()
+    from eval import benchmarks
+
+    if not benchmarks.is_cached(source):
+        console.print(
+            f"[red]{source} is not cached.[/red] "
+            f"Run: switchboard bench build {source}"
+        )
+        raise typer.Exit(code=1)
+
+    frame = benchmarks.load(source)
+    if suite:
+        frame = frame.filter(benchmark=suite)
+    if models:
+        wanted = [m.strip() for m in models.split(",") if m.strip()]
+        frame = frame.filter(models=wanted)
+        missing = set(wanted) - set(frame.models)
+        if missing:
+            console.print(f"[yellow]Not in this source: {sorted(missing)}[/yellow]")
+
+    if not len(frame):
+        console.print("[red]No rows matched those filters.[/red]")
+        raise typer.Exit(code=1)
+
+    grid = frame.grid()
+    if grid.n_queries == 0:
+        console.print(
+            "[red]No question was answered by every selected model.[/red]\n"
+            "Coverage is uneven - narrow the model list or pick one suite."
+        )
+        raise typer.Exit(code=1)
+
+    best_model, best_acc = grid.best_single_model()
+    cheap_model, cheap_cost = grid.cheapest_model()
+    oracle_acc = grid.oracle_accuracy()
+    oracle_cost = grid.oracle_cost()
+    best_cost = float(grid.cost[best_model].sum())
+
+    table = Table(title=f"{source}{f' / {suite}' if suite else ''} - routing headroom")
+    table.add_column("Reference point")
+    table.add_column("Accuracy", justify="right")
+    table.add_column("Cost", justify="right")
+
+    table.add_row(
+        f"cheapest model ({cheap_model})",
+        f"{grid.correct[cheap_model].mean():.1%}",
+        f"${cheap_cost:,.4f}",
+    )
+    table.add_row(
+        f"best single model ({best_model})", f"{best_acc:.1%}", f"${best_cost:,.4f}"
+    )
+    table.add_row(
+        "[bold]ORACLE (perfect routing)[/bold]",
+        f"[bold]{oracle_acc:.1%}[/bold]",
+        f"[bold]${oracle_cost:,.4f}[/bold]",
+    )
+    console.print(table)
+
+    console.print(
+        f"\n[bold]{grid.n_queries:,}[/bold] questions x "
+        f"[bold]{len(grid.models)}[/bold] models (complete grid)"
+    )
+    console.print(
+        f"accuracy headroom over the best single model: "
+        f"[green]+{100 * (oracle_acc - best_acc):.1f} points[/green]"
+    )
+    if best_cost > 0:
+        console.print(
+            f"cost at oracle quality: [green]{100 * (1 - oracle_cost / best_cost):.0f}%"
+            f" cheaper[/green] than always using {best_model}"
+        )
+    console.print(
+        f"questions routing could win: [green]{grid.routable_fraction():.1%}[/green]"
+        f"  (no model solves {1 - grid.solvable_fraction():.1%})"
+    )
 
 
 if __name__ == "__main__":

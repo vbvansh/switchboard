@@ -16,17 +16,26 @@ provider is off-machine.
 
 ## Status
 
-Milestone 2 of 6 — a metered OpenAI-compatible proxy. **Routing is not
-implemented yet**; every request still goes to one fixed model. What works
-today:
+**Routing is not implemented yet** — every request still goes to one fixed
+model. Everything the router will need is in place. What works today:
 
 - `POST /v1/chat/completions`, streaming and non-streaming
 - Drop-in compatibility with any OpenAI client via `base_url`
-- Per-developer API keys (`401` on a bad key)
-- Monthly budgets, enforced (`402` when exhausted)
-- Every request logged: who, which model, tokens, simulated cost, latency
-- Admin CLI for users, budgets, and usage reports
-- Local-provider enforcement
+- Multi-provider: add any OpenAI-compatible provider in `providers.yaml`
+- Per-developer API keys (`401`) and monthly budgets (`402`)
+- Every request logged: who, which model, tokens, cost, latency
+- Docker image, PostgreSQL support, liveness/readiness probes
+- Schema migrations — upgrades never destroy your data
+- Offline evaluation against 696k recorded answers from real models
+
+| Phase | | |
+|---|---|---|
+| A | Foundations: licence, privacy, migrations, providers, Docker | done |
+| B | Real benchmark data | loader done |
+| C | The routing brain | next |
+| D | Caching, failover, retries, metrics | |
+| E | Shadow mode + dashboard | |
+| F | Guardrails, docs, write-up | |
 
 ## Why this exists
 
@@ -43,6 +52,56 @@ The results are what matter, so the plan is to measure honestly:
 - **Two cost views, never blurred** — a *simulated* dollar cost (local models
   mapped onto published per-token prices, so budget logic is meaningful) and
   *measured* real cost (latency, tokens/sec, model swap count).
+
+## Benchmarks: real models, real costs
+
+Switchboard is evaluated against public routing benchmarks — hundreds of
+thousands of recorded answers from real models, with real costs. Every routing
+strategy can be scored offline, exactly, **without a single API call**.
+
+```powershell
+python scripts/fetch_llmrouterbench.py --extract   # ~1.3 GB download
+python -m switchboard bench build all              # normalise into a fast cache
+python -m switchboard bench list
+python -m switchboard bench headroom llmrouterbench --suite gpqa
+```
+
+Two sources, because they cover each other's gaps:
+
+| | [LLMRouterBench](https://github.com/ynulihao/LLMRouterBench) | [xRouteBench](https://huggingface.co/datasets/ulab-ai/xRouteBench) |
+|---|---|---|
+| Models | 40, incl. GPT-5, Claude, Gemini | 18 open-weight |
+| Rows | 548,059 | 147,906 |
+| Suites | 27 (GPQA, HLE, SWE-bench, …) | 13 (MMLU, GSM8K, MBPP, …) |
+| Per-query latency | no | **yes** |
+
+**The datasets are not redistributed here.** Neither declares a licence, and
+both derive from many upstream benchmarks with mixed terms plus outputs from
+commercial models. This repository ships a download script and the analysis
+code; the data is fetched from its original source. Please cite the papers if
+you use them.
+
+### What the data says
+
+Perfect routing beats the single best model, on both sources independently:
+
+```
+GPQA, 8 flagship models, 198 questions
+  cheapest  (qwen3-235b)      58.6%   $0.07
+  best      (gemini-2.5-pro)  84.8%  $16.59
+  ORACLE                      96.0%   $1.07     +11.1 pts, 94% cheaper
+
+xRouteBench, 18 models, 8,217 questions
+  cheapest  (gpt-oss-20b)     68.6%   $0.12
+  best      (cogito-671b)     77.3%   $3.74
+  ORACLE                      91.7%   $0.21     +14.4 pts, 94% cheaper
+```
+
+Price does not predict quality. On GPQA, Gemini 2.5 Pro and GPT-5 score
+identically while Gemini costs twice as much; on xRouteBench the cheapest model
+in the pool beats one costing 24× more. Those inefficiencies are what a router
+exists to exploit.
+
 
 ## Hardware note
 
