@@ -836,5 +836,139 @@ def bench_headroom(
     )
 
 
+@bench_cli.command("replay")
+def bench_replay(
+    source: str = typer.Argument(..., help="Which cached source to replay against."),
+    suite: str = typer.Option("", help="Restrict to one benchmark suite."),
+    models: str = typer.Option("", help="Comma-separated models to route between."),
+    strategies: str = typer.Option(
+        "random,keyword", help="Comma-separated strategies to score."
+    ),
+    seed: int = typer.Option(0, help="Seed for the random baseline."),
+    out_dir: str = typer.Option("results", help="Where to write the report."),
+    plot: bool = typer.Option(True, help="Also render the cost/accuracy chart."),
+) -> None:
+    """Score routing strategies against recorded answers - no API calls.
+
+    Every strategy is measured against three fixed reference points: the
+    cheapest model, the best single model (what companies do today), and an
+    oracle that always picks a model which answers correctly. A routing score
+    means nothing without that ceiling to compare it to.
+    """
+    _require_eval()
+    import pandas as pd
+
+    from eval import benchmarks
+    from eval.benchmarks import replay as replay_mod
+
+    if not benchmarks.is_cached(source):
+        console.print(
+            f"[red]{source} is not cached.[/red] "
+            f"Run: switchboard bench build {source}"
+        )
+        raise typer.Exit(code=1)
+
+    frame = benchmarks.load(source)
+    if suite:
+        frame = frame.filter(benchmark=suite)
+    if models:
+        wanted = [m.strip() for m in models.split(",") if m.strip()]
+        frame = frame.filter(models=wanted)
+        missing = set(wanted) - set(frame.models)
+        if missing:
+            console.print(f"[yellow]Not in this source: {sorted(missing)}[/yellow]")
+
+    if not len(frame):
+        console.print("[red]No rows matched those filters.[/red]")
+        raise typer.Exit(code=1)
+
+    grid = frame.grid()
+    if grid.n_queries == 0:
+        console.print(
+            "[red]No question was answered by every selected model.[/red]\n"
+            "Coverage is uneven - narrow the model list or pick one suite."
+        )
+        raise typer.Exit(code=1)
+
+    # Strategies see only the question text, exactly as they would live.
+    query_table = benchmarks.load_queries(source)
+    texts = {
+        (row.benchmark, row.query_id): row.query
+        for row in query_table.itertuples()
+    }
+
+    names = [s.strip() for s in strategies.split(",") if s.strip()]
+    console.print(
+        f"Replaying [cyan]{grid.n_queries:,}[/cyan] questions x "
+        f"[cyan]{len(grid.models)}[/cyan] models"
+    )
+
+    try:
+        results = replay_mod.replay(grid, texts, names, seed=seed)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    table = replay_mod.compare(results)
+
+    display = Table(title=f"{source}{f' / {suite}' if suite else ''} - routing replay")
+    display.add_column("Strategy")
+    display.add_column("Accuracy", justify="right")
+    display.add_column("Cost", justify="right")
+    display.add_column("Saving vs best", justify="right")
+    display.add_column("Gap closed", justify="right")
+    display.add_column("Models", justify="right")
+    display.add_column("Trade-off curve", justify="center")
+
+    for name, row in table.sort_values("cost_usd").iterrows():
+        reference = name in replay_mod.REFERENCE_STRATEGIES
+        label = f"[bold]{name}[/bold]" if reference else str(name)
+
+        gap = row.get("gap_closed")
+        if pd.isna(gap):
+            gap_text = "-"
+        elif gap < 0:
+            gap_text = f"[red]{gap:.0%}[/red]"
+        elif gap >= 0.5:
+            gap_text = f"[green]{gap:.0%}[/green]"
+        else:
+            gap_text = f"{gap:.0%}"
+
+        saving = row.get("saving_vs_best")
+        display.add_row(
+            label,
+            f"{row.accuracy:.1%}",
+            f"${row.cost_usd:,.4f}",
+            "-" if pd.isna(saving) else f"{saving:.1%}",
+            gap_text,
+            str(int(row.models_used)),
+            "[green]on[/green]" if row.get("pareto") else "[dim]dominated[/dim]",
+        )
+    console.print(display)
+
+    console.print(
+        "[dim]Gap closed = of the accuracy available between the best single "
+        "model and perfect routing, how much this captured. Negative means "
+        "less accurate than always using the best model - which can still be a "
+        "good trade if it saves enough.\n"
+        "Trade-off curve = no other achievable strategy is both cheaper AND "
+        "more accurate. 'Dominated' means there is no reason to pick it.[/dim]"
+    )
+
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    stem = f"replay-{source}" + (f"-{suite}" if suite else "")
+
+    (out_path / f"{stem}.md").write_text(
+        replay_mod.to_markdown(table) + "\n", encoding="utf-8"
+    )
+    table.to_csv(out_path / f"{stem}.csv")
+    console.print(f"\nWrote [cyan]{out_path / f'{stem}.md'}[/cyan] and .csv")
+
+    if plot:
+        chart = replay_mod.plot(table, out_path / f"{stem}.png")
+        console.print(f"Wrote [cyan]{chart}[/cyan]")
+
+
 if __name__ == "__main__":
     cli()

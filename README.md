@@ -103,6 +103,34 @@ in the pool beats one costing 24× more. Those inefficiencies are what a router
 exists to exploit.
 
 
+### Where the simple baselines land
+
+Replaying the naive strategies against recorded answers, with no API calls:
+
+```powershell
+python -m switchboard bench replay llmrouterbench --suite gpqa
+python -m switchboard bench replay xroutebench
+```
+
+GPQA, 8 flagship models, 198 questions:
+
+| Strategy | Accuracy | Cost | Saving vs best | Trade-off curve |
+|---|---|---|---|---|
+| always-cheapest | 58.6% | $0.07 | 99.6% | on |
+| keyword heuristic | 77.8% | $0.51 | 96.9% | on |
+| *oracle (impossible)* | *96.0%* | *$1.07* | *93.6%* | *ceiling* |
+| random | 70.7% | $3.96 | 76.1% | **dominated** |
+| always-best (gemini-2.5-pro) | 84.8% | $16.59 | — | on |
+
+Two things worth noting. `random` is **dominated** — the keyword heuristic is
+both cheaper and more accurate, so there is no reason to ever pick randomly.
+And on xRouteBench the result flips: the keyword heuristic is dominated there,
+scoring 57.9% where simply always using the cheapest model scores 68.6%.
+
+A hand-written heuristic that helps on one workload and actively hurts on
+another is worse than a consistent baseline, because you cannot tell in advance
+which case you are in. That is the problem the learned router has to solve.
+
 ## Hardware note
 
 Developed on a 4 GB GPU with 7.3 GB system RAM. That constraint shapes the
