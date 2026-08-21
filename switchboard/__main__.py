@@ -599,6 +599,29 @@ def eval_report(
         )
 
 
+def _explain_empty_grid(frame) -> None:
+    """Say WHICH models are shrinking the grid, not just that it is empty."""
+    counts = frame.why_grid_is_empty()
+    console.print(
+        "\n[yellow]No question was answered by every selected model.[/yellow]\n"
+        "These benchmarks ship several question splits and not every model ran "
+        "on all of them, so the overlap can be empty.\n"
+    )
+    table = Table(title="Questions attempted, per model")
+    table.add_column("Model")
+    table.add_column("Questions", justify="right")
+    for model, n in counts.items():
+        colour = "red" if n < counts.max() else "green"
+        table.add_row(str(model), f"[{colour}]{int(n):,}[/{colour}]")
+    console.print(table)
+
+    keep = counts[counts == counts.max()].index.tolist()
+    console.print(
+        f"\nTry dropping the low-coverage models. These {len(keep)} share the "
+        f"largest split:\n  [cyan]{','.join(keep)}[/cyan]"
+    )
+
+
 # --- Benchmarks ------------------------------------------------------------
 
 
@@ -964,6 +987,214 @@ def bench_replay(
     )
     table.to_csv(out_path / f"{stem}.csv")
     console.print(f"\nWrote [cyan]{out_path / f'{stem}.md'}[/cyan] and .csv")
+
+    if plot:
+        chart = replay_mod.plot(table, out_path / f"{stem}.png")
+        console.print(f"Wrote [cyan]{chart}[/cyan]")
+
+
+@bench_cli.command("train")
+def bench_train(
+    source: str = typer.Argument(..., help="Which cached source to train on."),
+    suite: str = typer.Option("", help="Restrict to one benchmark suite."),
+    models: str = typer.Option("", help="Comma-separated models to route between."),
+    test_size: float = typer.Option(0.3, help="Fraction of questions held out."),
+    thresholds: str = typer.Option(
+        "0.3,0.4,0.5,0.6,0.7,0.8", help="Confidence levels to sweep."
+    ),
+    seed: int = typer.Option(0, help="Seed for the split and the classifiers."),
+    features: str = typer.Option(
+        "tfidf",
+        help="surface | tfidf | embedding. Embeddings are far richer but very "
+        "slow without a GPU.",
+    ),
+    baselines: str = typer.Option(
+        "random,keyword", help="Baselines to compare against."
+    ),
+    out_dir: str = typer.Option("results", help="Where to write the report."),
+    plot: bool = typer.Option(True, help="Also render the cost/accuracy chart."),
+) -> None:
+    """Train a learned router and score it on questions it has never seen.
+
+    Learns, per model, the probability it answers a given question correctly,
+    then routes to the cheapest model clearing a confidence threshold. Sweeping
+    that threshold traces a whole cost/quality curve from one trained model.
+
+    Everything is measured on a held-out split. A router scored on its own
+    training questions measures memory, not judgement.
+    """
+    _require_eval()
+    import pandas as pd
+
+    from eval import benchmarks
+    from eval.benchmarks import learned
+    from eval.benchmarks import replay as replay_mod
+
+    if not benchmarks.is_cached(source):
+        console.print(
+            f"[red]{source} is not cached.[/red] "
+            f"Run: switchboard bench build {source}"
+        )
+        raise typer.Exit(code=1)
+
+    frame = benchmarks.load(source)
+    if suite:
+        frame = frame.filter(benchmark=suite)
+    if models:
+        wanted = [m.strip() for m in models.split(",") if m.strip()]
+        frame = frame.filter(models=wanted)
+
+    if not len(frame):
+        console.print("[red]No rows matched those filters.[/red]")
+        raise typer.Exit(code=1)
+
+    grid = frame.grid()
+    if grid.n_queries < 50:
+        console.print(
+            f"[red]Only {grid.n_queries} complete questions.[/red] "
+            "Too few to train and test on."
+        )
+        _explain_empty_grid(frame)
+        raise typer.Exit(code=1)
+
+    query_table = benchmarks.load_queries(source)
+    texts = {
+        (row.benchmark, row.query_id): row.query for row in query_table.itertuples()
+    }
+
+    train_index, test_index = learned.split_questions(grid, test_size, seed)
+    train_grid, test_grid = grid.subset(train_index), grid.subset(test_index)
+
+    console.print(
+        f"[bold]{grid.n_queries:,}[/bold] questions x "
+        f"[bold]{len(grid.models)}[/bold] models  ->  "
+        f"train {len(train_index):,} / test {len(test_index):,}"
+    )
+    console.print("Extracting features and training ...")
+
+    from eval.benchmarks.features import FeatureExtractor
+
+    predictor = learned.SuccessPredictor.train(
+        train_grid, texts, FeatureExtractor(mode=features), seed=seed
+    )
+
+    test_texts = [texts.get(key, "") for key in test_grid.correct.index]
+    console.print(f"Features: [cyan]{predictor.extractor.describe()}[/cyan]")
+
+    report = learned.training_report(predictor, test_grid, texts)
+    mean_auc = report["auc"].mean()
+
+    auc_table = Table(title="Can we predict success? (held-out AUC)")
+    auc_table.add_column("Model")
+    auc_table.add_column("Gets it right", justify="right")
+    auc_table.add_column("AUC", justify="right")
+    for model, row in report.head(12).iterrows():
+        auc = row["auc"]
+        colour = "green" if auc >= 0.65 else "yellow" if auc >= 0.55 else "red"
+        auc_table.add_row(
+            str(model),
+            f"{row['base_rate']:.1%}",
+            "-" if pd.isna(auc) else f"[{colour}]{auc:.3f}[/{colour}]",
+        )
+    console.print(auc_table)
+    console.print(
+        f"[dim]AUC 0.5 = no better than guessing, 1.0 = perfect. "
+        f"Mean across models: {mean_auc:.3f}. If these sit near 0.5 the "
+        f"features carry no signal and no routing rule on top will help.[/dim]\n"
+    )
+
+    # --- Score everything on the held-out split ---------------------------
+    levels = [float(t) for t in thresholds.split(",") if t.strip()]
+    routers = learned.routers_for_thresholds(
+        predictor, train_grid.mean_cost_per_model(), levels
+    )
+
+    baseline_names = [b.strip() for b in baselines.split(",") if b.strip()]
+    results = replay_mod.replay(test_grid, texts, baseline_names, seed=seed)
+
+    for router in routers:
+        # Predict for the whole split in one pass; each decision then costs a
+        # dictionary lookup instead of a fresh model call.
+        router.warm(test_texts)
+        choices = replay_mod.strategy_choices(router, test_grid, texts)
+        results.append(replay_mod._result(router.name, test_grid, choices))
+
+    table = replay_mod.compare(results)
+
+    heading = f"{source}{f' / {suite}' if suite else ''} - held-out results"
+    display = Table(title=heading)
+    display.add_column("Strategy")
+    display.add_column("Accuracy", justify="right")
+    display.add_column("Cost", justify="right")
+    display.add_column("Saving vs best", justify="right")
+    display.add_column("Gap closed", justify="right")
+    display.add_column("Models", justify="right")
+    display.add_column("Curve", justify="center")
+
+    for name, row in table.sort_values("cost_usd").iterrows():
+        is_learned = str(name).startswith("learned")
+        is_ref = name in replay_mod.REFERENCE_STRATEGIES
+        label = (
+            f"[cyan]{name}[/cyan]" if is_learned
+            else f"[bold]{name}[/bold]" if is_ref
+            else str(name)
+        )
+        gap = row.get("gap_closed")
+        if pd.isna(gap):
+            gap_text = "-"
+        elif gap < 0:
+            gap_text = f"[red]{gap:.0%}[/red]"
+        elif gap >= 0.3:
+            gap_text = f"[green]{gap:.0%}[/green]"
+        else:
+            gap_text = f"{gap:.0%}"
+
+        saving = row.get("saving_vs_best")
+        display.add_row(
+            label,
+            f"{row.accuracy:.1%}",
+            f"${row.cost_usd:,.4f}",
+            "-" if pd.isna(saving) else f"{saving:.1%}",
+            gap_text,
+            str(int(row.models_used)),
+            "[green]on[/green]" if row.get("pareto") else "[dim]dominated[/dim]",
+        )
+    console.print(display)
+
+    # --- Did it actually work? --------------------------------------------
+    learned_rows = table[table.index.str.startswith("learned")]
+    beaten = []
+    for name in baseline_names + ["always-cheapest", "always-best"]:
+        if name not in table.index:
+            continue
+        base = table.loc[name]
+        better = learned_rows[
+            (learned_rows["accuracy"] >= base["accuracy"])
+            & (learned_rows["cost_usd"] <= base["cost_usd"])
+        ]
+        if len(better):
+            beaten.append(name)
+
+    if beaten:
+        console.print(
+            f"\n[green]The learned router dominates: {', '.join(beaten)}[/green] "
+            "(at least as accurate, and no more expensive)"
+        )
+    else:
+        console.print(
+            "\n[yellow]The learned router does not dominate any baseline.[/yellow] "
+            "It may still sit on the trade-off curve - check the Curve column."
+        )
+
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    stem = f"trained-{source}" + (f"-{suite}" if suite else "")
+    (out_path / f"{stem}.md").write_text(
+        replay_mod.to_markdown(table) + "\n", encoding="utf-8"
+    )
+    table.to_csv(out_path / f"{stem}.csv")
+    report.to_csv(out_path / f"{stem}-auc.csv")
+    console.print(f"\nWrote [cyan]{out_path / f'{stem}.md'}[/cyan], .csv and -auc.csv")
 
     if plot:
         chart = replay_mod.plot(table, out_path / f"{stem}.png")

@@ -31,8 +31,8 @@ model. Everything the router will need is in place. What works today:
 | Phase | | |
 |---|---|---|
 | A | Foundations: licence, privacy, migrations, providers, Docker | done |
-| B | Real benchmark data | loader done |
-| C | The routing brain | next |
+| B | Real benchmark data | done |
+| C | The routing brain | learned router done; live wiring next |
 | D | Caching, failover, retries, metrics | |
 | E | Shadow mode + dashboard | |
 | F | Guardrails, docs, write-up | |
@@ -130,6 +130,52 @@ scoring 57.9% where simply always using the cheapest model scores 68.6%.
 A hand-written heuristic that helps on one workload and actively hurts on
 another is worse than a consistent baseline, because you cannot tell in advance
 which case you are in. That is the problem the learned router has to solve.
+
+### The learned router
+
+`switchboard bench train` learns, per model, the probability it answers a given
+question correctly, then routes to the cheapest model clearing a confidence
+threshold. Sweeping that threshold traces a whole cost/quality curve from one
+trained model. Everything is scored on **held-out questions**.
+
+```powershell
+python -m switchboard bench train llmrouterbench --suite mmlupro --models "gpt-5,claude-sonnet-4,gemini-2.5-pro,gemini-2.5-flash,kimi-k2-0905,qwen3-235b-a22b-2507"
+```
+
+MMLU-Pro, 6 flagship models, 1,200 held-out questions:
+
+| Strategy | Accuracy | Cost | Saving | Curve |
+|---|---|---|---|---|
+| always-cheapest | 84.0% | $0.71 | 95% | on |
+| learned @0.40 | 86.2% | $2.23 | 85% | on |
+| *oracle (impossible)* | *93.6%* | *$2.43* | *84%* | *ceiling* |
+| learned @0.50 | 87.4% | $3.68 | 76% | on |
+| **learned @0.60** | **88.3%** | **$6.42** | **57%** | **on** |
+| keyword | 80.8% | $2.80 | 81% | dominated |
+| random | 83.8% | $12.99 | 14% | dominated |
+| always-best | 86.8% | $15.07 | — | **dominated** |
+
+**The learned router dominates always-best**: 88.3% versus 86.8% accuracy, at
+57% lower cost. More accurate *and* cheaper than the best single model money
+can buy — which is the outcome the whole project was testing for.
+
+It also dominates both naive baselines. On xRouteBench it dominates `random`
+and `keyword` and sits on the trade-off curve throughout, but does **not** beat
+always-best on accuracy there. One decisive win, one partial — reported as
+measured.
+
+Prediction quality is reported as AUC per model (0.5 = guessing, 1.0 = perfect):
+mean **0.745** on MMLU-Pro and **0.800** on xRouteBench. If those sat near 0.5
+the features would carry no signal and no routing rule could help.
+
+#### A note on features
+
+The default text representation is **TF-IDF**, not neural embeddings.
+Embeddings are supported (`--features embedding`) and are richer in principle,
+but were measured at roughly **0.5 texts/second** on the development machine —
+a 17-minute run that never finished. TF-IDF fits thousands of questions in
+under a second and the whole experiment takes 12 seconds. On a machine with a
+GPU, use embeddings.
 
 ## Hardware note
 

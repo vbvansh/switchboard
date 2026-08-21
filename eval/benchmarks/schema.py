@@ -104,6 +104,24 @@ class Grid:
     def n_queries(self) -> int:
         return len(self.correct)
 
+    def subset(self, index) -> Grid:
+        """A grid over a subset of the questions.
+
+        Used to split into training and held-out test halves. A learned router
+        can memorise the questions it was trained on, so it must be scored on
+        questions it has never seen - otherwise the number measures recall, not
+        the ability to judge a new question.
+        """
+        return Grid(
+            correct=self.correct.loc[index],
+            cost=self.cost.loc[index],
+            latency=self.latency.loc[index],
+        )
+
+    def mean_cost_per_model(self) -> pd.Series:
+        """Average spend per question, per model. The router's price list."""
+        return self.cost.mean()
+
     # --- Reference points --------------------------------------------------
 
     def model_accuracy(self) -> pd.Series:

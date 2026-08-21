@@ -210,6 +210,18 @@ class BenchmarkFrame:
             ),
         )
 
+    def why_grid_is_empty(self) -> pd.Series:
+        """Questions attempted per model, fewest first.
+
+        When a complete grid comes out empty, it is because the selected models
+        did not all answer the same questions - benchmarks here ship several
+        splits and not every model ran on every one. Showing the counts points
+        straight at the model to drop.
+        """
+        return (
+            self.frame.groupby("model")["query_id"].nunique().sort_values()
+        )
+
     def coverage(self) -> pd.DataFrame:
         """Which models answered which benchmarks - for spotting sparse ones."""
         return (
