@@ -32,7 +32,7 @@ model. Everything the router will need is in place. What works today:
 |---|---|---|
 | A | Foundations: licence, privacy, migrations, providers, Docker | done |
 | B | Real benchmark data | done |
-| C | The routing brain | router + cascades done; live wiring next |
+| C | The routing brain | router, cascades, SLAs done; live wiring next |
 | D | Caching, failover, retries, metrics | |
 | E | Shadow mode + dashboard | |
 | F | Guardrails, docs, write-up | |
@@ -202,6 +202,45 @@ learned router tops out.
 The lesson is about price spread, not about cascades being good or bad. When
 the escalation target is far more expensive than the alternatives, paying twice
 rarely pays off.
+
+#### Latency SLAs: what a speed promise costs
+
+An **SLA** (Service Level Agreement) is a promise about how a service behaves.
+A latency SLA promises speed — "95% of requests answered within 4 seconds".
+
+A router that optimises only cost and accuracy will happily pick a model that
+takes 10 seconds. `switchboard bench sla` measures what promising otherwise
+actually costs:
+
+```powershell
+python -m switchboard bench sla xroutebench --budgets "2.0,4.0,6.0,10.0"
+```
+
+xRouteBench, 2,466 held-out questions, 18 models:
+
+| SLA | Accuracy | Cost | p95 latency | Violations | Models eligible |
+|---|---|---|---|---|---|
+| no SLA | 71.8% | $0.120 | 6.68s | — | 18 |
+| ≤ 2s | — | — | — | — | **impossible** |
+| ≤ 4s | 55.6% | $0.071 | 3.61s | 3.9% | 2 |
+| ≤ 6s | 62.5% | $0.253 | 5.06s | 1.8% | 5 |
+| ≤ 10s | 71.9% | $0.129 | 6.55s | 1.9% | 14 |
+
+The tightest achievable promise gives up **16.1 percentage points of accuracy**
+and keeps violations under the usual 5% target. No model in this pool can
+promise 2 seconds at all — which is itself the answer: add a faster model or
+loosen the budget.
+
+Two rules keep this honest:
+
+**Eligibility uses the tail, not the median.** The first version selected models
+by median latency and produced a "fast" set whose p95 was *worse* than routing
+with no SLA at all. `deepseek-v3.1` answers in 0.95s typically and 16.4s at p95.
+To promise p95 ≤ B you must require p95 ≤ B.
+
+**Violations are counted against what actually happened** — the recorded
+per-request latency, not the averages the router used to decide. Picking a fast
+model is not the same as being fast.
 
 #### A note on features
 

@@ -1259,5 +1259,219 @@ def bench_train(
         console.print(f"Wrote [cyan]{chart}[/cyan]")
 
 
+@bench_cli.command("sla")
+def bench_sla(
+    source: str = typer.Argument(..., help="Cached source (needs per-query latency)."),
+    suite: str = typer.Option("", help="Restrict to one benchmark suite."),
+    models: str = typer.Option("", help="Comma-separated models to route between."),
+    budgets: str = typer.Option(
+        "1.0,1.5,2.0,3.0,5.0", help="Latency budgets in seconds to sweep."
+    ),
+    quality: float = typer.Option(0.5, help="Minimum predicted success to accept."),
+    test_size: float = typer.Option(0.3, help="Fraction of questions held out."),
+    seed: int = typer.Option(0, help="Seed for the split and the classifiers."),
+    features: str = typer.Option("tfidf", help="surface | tfidf | embedding."),
+    out_dir: str = typer.Option("results", help="Where to write the report."),
+) -> None:
+    """What does a latency promise cost you?
+
+    Sweeps a range of latency budgets. For each, the router may only choose
+    models whose typical response time fits, then takes the cheapest one likely
+    enough to be right. Tightening the budget forces it off slower - often
+    better - models, and the table shows exactly what that costs in accuracy.
+
+    Violations are measured against the latency ACTUALLY recorded per request,
+    not against the model averages the router used to decide.
+    """
+    _require_eval()
+    import pandas as pd
+
+    from eval import benchmarks
+    from eval.benchmarks import constraints as constraints_mod
+    from eval.benchmarks import learned
+    from eval.benchmarks import replay as replay_mod
+    from eval.benchmarks.features import FeatureExtractor
+
+    if not benchmarks.is_cached(source):
+        console.print(
+            f"[red]{source} is not cached.[/red] "
+            f"Run: switchboard bench build {source}"
+        )
+        raise typer.Exit(code=1)
+
+    frame = benchmarks.load(source)
+    if suite:
+        frame = frame.filter(benchmark=suite)
+    if models:
+        frame = frame.filter(models=[m.strip() for m in models.split(",") if m.strip()])
+
+    if not frame.has_latency:
+        console.print(
+            f"[red]{source} records no per-request latency.[/red]\n"
+            "Latency SLAs can only be measured where response times were "
+            "recorded. Try: [cyan]switchboard bench sla xroutebench[/cyan]"
+        )
+        raise typer.Exit(code=1)
+
+    grid = frame.grid()
+    if grid.n_queries < 50:
+        console.print(f"[red]Only {grid.n_queries} complete questions.[/red]")
+        _explain_empty_grid(frame)
+        raise typer.Exit(code=1)
+
+    query_table = benchmarks.load_queries(source)
+    texts = {
+        (row.benchmark, row.query_id): row.query for row in query_table.itertuples()
+    }
+
+    train_index, test_index = learned.split_questions(grid, test_size, seed)
+    train_grid, test_grid = grid.subset(train_index), grid.subset(test_index)
+
+    predictor = learned.SuccessPredictor.train(
+        train_grid, texts, FeatureExtractor(mode=features), seed=seed
+    )
+    profile = constraints_mod.ModelProfile.from_grid(train_grid)
+    test_texts = [texts.get(key, "") for key in test_grid.correct.index]
+
+    console.print(
+        f"[bold]{test_grid.n_queries:,}[/bold] held-out questions x "
+        f"[bold]{len(grid.models)}[/bold] models"
+    )
+
+    speeds = Table(title="Latency per model (from training)")
+    speeds.add_column("Model")
+    speeds.add_column("Median", justify="right")
+    speeds.add_column(
+        f"p{constraints_mod.SLA_PERCENTILE} (used for eligibility)", justify="right"
+    )
+    speeds.add_column("Accuracy", justify="right")
+    accuracy = train_grid.model_accuracy()
+    for model in profile.latency_tail.sort_values().index:
+        speeds.add_row(
+            str(model),
+            f"{profile.latency[model]:.2f}s",
+            f"{profile.latency_tail[model]:.2f}s",
+            f"{accuracy.get(model, float('nan')):.1%}",
+        )
+    console.print(speeds)
+
+    levels = [float(b) for b in budgets.split(",") if b.strip()]
+    rows = []
+
+    # Unconstrained reference: what you get with no promise at all.
+    for label, limits in [
+        ("no SLA", constraints_mod.Constraints(min_quality=quality)),
+        *[
+            (
+                f"<= {budget:g}s",
+                constraints_mod.Constraints(
+                    max_latency_s=budget, min_quality=quality
+                ),
+            )
+            for budget in levels
+        ],
+    ]:
+        router = constraints_mod.ConstrainedRouter(predictor, profile, limits)
+        router.warm(test_texts)
+        choices = replay_mod.strategy_choices(router, test_grid, texts)
+        scored = test_grid.score_for(choices)
+        budget = limits.max_latency_s
+        latency = constraints_mod.latency_report(test_grid, choices, budget)
+
+        rows.append(
+            {
+                "sla": label,
+                "accuracy": scored["accuracy"],
+                "cost_usd": scored["cost_usd"],
+                "p95_latency_s": latency.get("p95_latency_s", float("nan")),
+                "violation_rate": latency.get("sla_violation_rate", float("nan")),
+                "unsatisfiable": router.unsatisfiable,
+                "n_queries": scored["n_queries"],
+                "models_used": len(set(choices)),
+            }
+        )
+
+    table = pd.DataFrame(rows).set_index("sla")
+
+    display = Table(title=f"{source} - what a latency promise costs")
+    display.add_column("SLA")
+    display.add_column("Accuracy", justify="right")
+    display.add_column("Cost", justify="right")
+    display.add_column("p95 latency", justify="right")
+    display.add_column("Violations", justify="right")
+    display.add_column("Models", justify="right")
+    display.add_column("Impossible", justify="right")
+
+    for label, row in table.iterrows():
+        violations = row.violation_rate
+        if pd.isna(violations):
+            violation_text = "-"
+        elif violations <= 0.05:
+            violation_text = f"[green]{violations:.1%}[/green]"
+        elif violations <= 0.20:
+            violation_text = f"[yellow]{violations:.1%}[/yellow]"
+        else:
+            violation_text = f"[red]{violations:.1%}[/red]"
+
+        # A promise no model can keep is not a trade-off, it is a promise
+        # that was never achievable. Showing it as an ordinary row would hide
+        # that the router simply fell back on every single request.
+        share = row.unsatisfiable / max(int(row.get("n_queries", 0) or 0), 1)
+        if row.unsatisfiable:
+            impossible = f"[red]{share:.0%}[/red]"
+        else:
+            impossible = "[green]-[/green]"
+
+        display.add_row(
+            str(label),
+            f"{row.accuracy:.1%}",
+            f"${row.cost_usd:,.4f}",
+            "-" if pd.isna(row.p95_latency_s) else f"{row.p95_latency_s:.2f}s",
+            violation_text,
+            str(int(row.models_used)),
+            impossible,
+        )
+    console.print(display)
+
+    unconstrained = table.loc["no SLA"]
+    console.print(
+        "[dim]Violations are measured against the latency ACTUALLY recorded "
+        "per request, not the model averages the router used to decide - a "
+        "fast model can still answer slowly. 5% or under is the usual target "
+        f"for a p{constraints_mod.SLA_PERCENTILE} promise.[/dim]"
+    )
+
+    # Compare against the tightest budget that was actually ACHIEVABLE. A
+    # promise no model can keep tells you nothing about the trade-off - the
+    # router simply fell back on every request.
+    achievable = table.iloc[1:][table.iloc[1:]["unsatisfiable"] == 0]
+    if len(achievable):
+        strictest = achievable.iloc[0]
+        lost = unconstrained.accuracy - strictest.accuracy
+        colour = "red" if lost > 0.05 else "green"
+        console.print(
+            f"\nThe tightest achievable promise ([cyan]{strictest.name}[/cyan]) "
+            f"gives up [{colour}]{lost:.1%}[/] accuracy versus routing with no "
+            f"SLA at all, and keeps violations at "
+            f"{strictest.violation_rate:.1%}."
+        )
+
+    impossible = table[table["unsatisfiable"] > 0]
+    if len(impossible):
+        console.print(
+            f"[yellow]No model is fast enough to promise: "
+            f"{', '.join(str(i) for i in impossible.index)}.[/yellow]\n"
+            "Those rows fell back to the fastest model on every request - the "
+            "promise was never achievable with this pool, which is itself the "
+            "answer. Add a faster model or loosen the budget."
+        )
+
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    stem = f"sla-{source}" + (f"-{suite}" if suite else "")
+    table.to_csv(out_path / f"{stem}.csv")
+    console.print(f"\nWrote [cyan]{out_path / f'{stem}.csv'}[/cyan]")
+
+
 if __name__ == "__main__":
     cli()
