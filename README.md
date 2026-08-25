@@ -32,7 +32,7 @@ model. Everything the router will need is in place. What works today:
 |---|---|---|
 | A | Foundations: licence, privacy, migrations, providers, Docker | done |
 | B | Real benchmark data | done |
-| C | The routing brain | learned router done; live wiring next |
+| C | The routing brain | router + cascades done; live wiring next |
 | D | Caching, failover, retries, metrics | |
 | E | Shadow mode + dashboard | |
 | F | Guardrails, docs, write-up | |
@@ -167,6 +167,41 @@ measured.
 Prediction quality is reported as AUC per model (0.5 = guessing, 1.0 = perfect):
 mean **0.745** on MMLU-Pro and **0.800** on xRouteBench. If those sat near 0.5
 the features would carry no signal and no routing rule could help.
+
+#### Cascades: call cheap, look, then decide
+
+The learned router guesses from the question alone, before calling anything. A
+**cascade** decides after: it pays for a cheap call, inspects the answer, and
+escalates only if unconvinced. Two ways to judge that answer, neither allowed to
+peek at whether it was actually correct:
+
+- **agreement** — ask two cheap models; matching answers are evidence, a
+  disagreement escalates. No training needed.
+- **learned verifier** — a classifier predicting "was the cheap model right?"
+  from the question plus what the cheap model did: answer length, and whether a
+  second model agreed.
+
+A cascade that escalates has paid for **both** calls, and the scoring charges
+for every call made. Charging only the final model is the easiest way to make a
+cascade look better than it is.
+
+The two datasets disagree, which is the interesting part:
+
+| | MMLU-Pro (6 flagships) | xRouteBench (18 open models) |
+|---|---|---|
+| Best learned router | **88.3%** @ $6.42 | 74.8% @ $0.33 |
+| Best cascade | 87.5% @ $7.96 | **77.4%** @ $0.89 |
+| Cascades on the curve | **0 of 6** | **5 of 6** |
+
+On MMLU-Pro every cascade is **dominated** — escalating to a $15 model even a
+third of the time costs more than the learned router's spread across six. On
+xRouteBench, where models are closer in price, the double-call penalty is small
+and the better information wins: cascades extend the frontier past where the
+learned router tops out.
+
+The lesson is about price spread, not about cascades being good or bad. When
+the escalation target is far more expensive than the alternatives, paying twice
+rarely pays off.
 
 #### A note on features
 

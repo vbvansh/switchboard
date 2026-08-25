@@ -599,6 +599,54 @@ def eval_report(
         )
 
 
+def _score_cascades(test_grid, train_grid, texts, levels, feature_mode, seed):
+    """Score cascade strategies on the held-out split.
+
+    Every cascade result is priced with `score_for_paths`, which charges for
+    each call made rather than only the final one. A cascade that escalates has
+    genuinely paid twice.
+    """
+    from eval.benchmarks import cascade as cascade_mod
+    from eval.benchmarks.features import FeatureExtractor
+    from eval.benchmarks.replay import ReplayResult
+
+    results = []
+
+    def as_result(name, paths):
+        scored = test_grid.score_for_paths(paths)
+        usage = {}
+        for model in scored.pop("final_models"):
+            usage[model] = usage.get(model, 0) + 1
+        return ReplayResult(
+            strategy=name,
+            accuracy=scored["accuracy"],
+            cost_usd=scored["cost_usd"],
+            mean_latency_s=scored["mean_latency_s"],
+            n_queries=scored["n_queries"],
+            model_usage=usage,
+        )
+
+    if cascade_mod.has_answers(test_grid):
+        try:
+            paths = cascade_mod.agreement_paths(test_grid)
+            results.append(as_result("cascade-agree", paths))
+        except ValueError as exc:
+            console.print(f"[yellow]Agreement cascade skipped: {exc}[/yellow]")
+    else:
+        console.print(
+            "[dim]Agreement cascade skipped: this source records no parsed "
+            "answers to compare between models.[/dim]"
+        )
+
+    template = cascade_mod.VerifierCascade.train(
+        train_grid, texts, FeatureExtractor(mode=feature_mode), seed=seed
+    )
+    for variant in cascade_mod.cascades_for_thresholds(template, levels):
+        results.append(as_result(variant.name, variant.paths(test_grid, texts)))
+
+    return results
+
+
 def _explain_empty_grid(frame) -> None:
     """Say WHICH models are shrinking the grid, not just that it is empty."""
     counts = frame.why_grid_is_empty()
@@ -1011,6 +1059,11 @@ def bench_train(
     baselines: str = typer.Option(
         "random,keyword", help="Baselines to compare against."
     ),
+    cascades: bool = typer.Option(
+        True,
+        help="Also score cascades: call a cheap model, inspect the answer, "
+        "escalate only if unconvinced.",
+    ),
     out_dir: str = typer.Option("results", help="Where to write the report."),
     plot: bool = typer.Option(True, help="Also render the cost/accuracy chart."),
 ) -> None:
@@ -1119,6 +1172,11 @@ def bench_train(
         choices = replay_mod.strategy_choices(router, test_grid, texts)
         results.append(replay_mod._result(router.name, test_grid, choices))
 
+    if cascades:
+        results.extend(
+            _score_cascades(test_grid, train_grid, texts, levels, features, seed)
+        )
+
     table = replay_mod.compare(results)
 
     heading = f"{source}{f' / {suite}' if suite else ''} - held-out results"
@@ -1132,7 +1190,7 @@ def bench_train(
     display.add_column("Curve", justify="center")
 
     for name, row in table.sort_values("cost_usd").iterrows():
-        is_learned = str(name).startswith("learned")
+        is_learned = str(name).startswith(("learned", "cascade"))
         is_ref = name in replay_mod.REFERENCE_STRATEGIES
         label = (
             f"[cyan]{name}[/cyan]" if is_learned
@@ -1162,7 +1220,7 @@ def bench_train(
     console.print(display)
 
     # --- Did it actually work? --------------------------------------------
-    learned_rows = table[table.index.str.startswith("learned")]
+    learned_rows = table[table.index.str.startswith(("learned", "cascade"))]
     beaten = []
     for name in baseline_names + ["always-cheapest", "always-best"]:
         if name not in table.index:
@@ -1177,7 +1235,7 @@ def bench_train(
 
     if beaten:
         console.print(
-            f"\n[green]The learned router dominates: {', '.join(beaten)}[/green] "
+            f"\n[green]Learned strategies dominate: {', '.join(beaten)}[/green] "
             "(at least as accurate, and no more expensive)"
         )
     else:

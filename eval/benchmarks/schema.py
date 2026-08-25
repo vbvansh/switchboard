@@ -29,6 +29,10 @@ COLUMNS = (
     "prompt_tokens",
     "output_tokens",
     "latency_s",      # measured; NaN where the source does not record it
+    # A fingerprint of what the model answered - see `answer_key`. Not the
+    # ground truth: this is what a cascade may look at after paying for a
+    # cheap call. Empty where a source records no parsed answer.
+    "prediction",
 )
 
 #: Columns of the query lookup table.
@@ -44,7 +48,37 @@ DTYPES = {
     "prompt_tokens": "int64",
     "output_tokens": "int64",
     "latency_s": "float64",
+    "prediction": "string",
 }
+
+
+#: Answers longer than this are stored as a hash instead of verbatim.
+#: Multiple-choice answers ("B") stay readable; a 1.7 MB code submission
+#: becomes 18 characters.
+ANSWER_KEY_MAX_CHARS = 64
+
+
+def answer_key(prediction: str | None) -> str:
+    """A short, comparable fingerprint of a model's answer.
+
+    Cascades compare answers between models to gauge confidence: two models
+    agreeing is evidence the answer is right. Only equality matters, never the
+    content - so long answers are hashed rather than stored.
+
+    That keeps the cache small AND keeps the semantics exact. Two identical
+    essays hash identically; two different ones do not. Truncating instead
+    would make different answers collide.
+    """
+    if not prediction:
+        return ""
+
+    normalised = " ".join(str(prediction).split()).lower()
+    if len(normalised) <= ANSWER_KEY_MAX_CHARS:
+        return normalised
+
+    import hashlib
+
+    return "h:" + hashlib.sha1(normalised.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 class BenchmarkError(ValueError):
@@ -95,6 +129,8 @@ class Grid:
     correct: pd.DataFrame     # questions x models, values 0..1
     cost: pd.DataFrame        # questions x models, USD
     latency: pd.DataFrame     # questions x models, seconds (may be all NaN)
+    output_tokens: pd.DataFrame | None = None
+    prediction: pd.DataFrame | None = None
 
     @property
     def models(self) -> list[str]:
@@ -112,10 +148,15 @@ class Grid:
         questions it has never seen - otherwise the number measures recall, not
         the ability to judge a new question.
         """
+        def slice_of(frame):
+            return None if frame is None else frame.loc[index]
+
         return Grid(
             correct=self.correct.loc[index],
             cost=self.cost.loc[index],
             latency=self.latency.loc[index],
+            output_tokens=slice_of(self.output_tokens),
+            prediction=slice_of(self.prediction),
         )
 
     def mean_cost_per_model(self) -> pd.Series:
@@ -163,6 +204,60 @@ class Grid:
         cheapest, _ = self.cheapest_model()
         winnable = (self.correct.max(axis=1) > 0) & (self.correct[cheapest] <= 0)
         return float(winnable.mean())
+
+    def score_for_paths(self, paths: pd.Series) -> dict[str, float]:
+        """Evaluate a cascade: the ordered list of models actually called.
+
+        A cascade that escalates has paid for BOTH calls, so cost and latency
+        sum over the whole path. Charging only for the final model would make
+        every cascade look cheaper than it is - the single easiest way to
+        produce a flattering, wrong result here.
+
+        Correctness comes from the last model called, which is the answer the
+        cascade ultimately returns.
+        """
+        aligned = paths.reindex(self.correct.index)
+        if aligned.isna().any():
+            raise BenchmarkError(
+                f"{int(aligned.isna().sum())} questions have no routing path."
+            )
+
+        total_cost = 0.0
+        total_latency = 0.0
+        correct = 0.0
+        calls = 0
+        final_models: list[str] = []
+
+        for question, path in aligned.items():
+            if not path:
+                raise BenchmarkError(f"Empty routing path for {question}.")
+
+            unknown = set(path) - set(self.models)
+            if unknown:
+                raise BenchmarkError(
+                    f"Cascade called models not in this grid: {sorted(unknown)}"
+                )
+
+            for model in path:
+                total_cost += float(self.cost.at[question, model])
+                latency = self.latency.at[question, model]
+                if latency == latency:  # not NaN
+                    total_latency += float(latency)
+            calls += len(path)
+
+            final = path[-1]
+            final_models.append(final)
+            correct += float(self.correct.at[question, final])
+
+        n = len(aligned)
+        return {
+            "accuracy": correct / n if n else 0.0,
+            "cost_usd": total_cost,
+            "mean_latency_s": total_latency / n if n else 0.0,
+            "n_queries": n,
+            "calls_per_query": calls / n if n else 0.0,
+            "final_models": final_models,
+        }
 
     def score_for(self, choices: pd.Series) -> dict[str, float]:
         """Evaluate a routing decision: one chosen model per question.

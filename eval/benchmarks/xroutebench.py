@@ -102,6 +102,10 @@ def load() -> tuple[pd.DataFrame, pd.DataFrame]:
             "prompt_tokens": joined["input_tokens"].astype("int64"),
             "output_tokens": joined["output_tokens"].astype("int64"),
             "latency_s": joined["response_time"].astype(float),
+            # This source stores the full response text, not a parsed
+            # answer, so there is nothing comparable to match between
+            # models. Cascades that need agreement will skip it.
+            "prediction": "",
         },
         columns=list(COLUMNS),
     )

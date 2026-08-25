@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from eval.benchmarks.schema import COLUMNS, QUERY_COLUMNS
+from eval.benchmarks.schema import COLUMNS, QUERY_COLUMNS, answer_key
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,7 @@ def load_benchmark_dir(directory: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
                     int(record.get("prompt_tokens") or 0),
                     int(record.get("completion_tokens") or 0),
                     float("nan"),  # this dataset records no per-request latency
+                    answer_key(record.get("prediction")),
                 )
             )
 

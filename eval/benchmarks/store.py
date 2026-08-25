@@ -87,7 +87,19 @@ def load(source: str, rebuild: bool = False) -> BenchmarkFrame:
     if rebuild or not is_cached(source):
         logger.info("Building cache for %s ...", source)
         build(source)
-    return BenchmarkFrame(pd.read_parquet(outcomes_path(source)), source)
+
+    frame = pd.read_parquet(outcomes_path(source))
+
+    # A cache built by an older version can be missing columns added since.
+    # Silently carrying on would produce analyses with holes in them.
+    missing = [c for c in COLUMNS if c not in frame.columns]
+    if missing:
+        raise RuntimeError(
+            f"The {source} cache is out of date - missing {missing}.\n"
+            f"  Rebuild it with: switchboard bench build {source} --rebuild"
+        )
+
+    return BenchmarkFrame(frame, source)
 
 
 def load_queries(source: str) -> pd.DataFrame:
@@ -202,12 +214,17 @@ class BenchmarkFrame:
 
         # reindex, not .loc: a source missing a column entirely should yield
         # NaN for it, not raise.
+        def aligned(column: str) -> pd.DataFrame:
+            return (
+                pivot(column).reindex(correct.index).reindex(columns=correct.columns)
+            )
+
         return Grid(
             correct=correct,
             cost=pivot("cost_usd").reindex(correct.index),
-            latency=pivot("latency_s").reindex(correct.index).reindex(
-                columns=correct.columns
-            ),
+            latency=aligned("latency_s"),
+            output_tokens=aligned("output_tokens"),
+            prediction=aligned("prediction"),
         )
 
     def why_grid_is_empty(self) -> pd.Series:
