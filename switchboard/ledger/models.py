@@ -95,6 +95,11 @@ class RequestLog(Base):
     # measurement - named accordingly.
     caused_model_switch: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Why the router chose this model. Free text, written by the strategy.
+    # Without it, a routing decision that looks wrong cannot be debugged after
+    # the fact - and shadow mode in Phase E reads it directly.
+    routing_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # --- Outcome -----------------------------------------------------------
     # ok | blocked_budget | provider_error | client_error
     status: Mapped[str] = mapped_column(String(32), default="ok", index=True)

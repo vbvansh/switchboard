@@ -42,6 +42,15 @@ alembic>=1.14
 # sharing one Switchboard needs a real database server.
 psycopg[binary]>=3.2
 
+# --- Live routing ---------------------------------------------------------
+# The server loads a trained router and runs inference on every `auto` request,
+# so these are runtime dependencies, not just training ones. The TRAINING side
+# (feature engineering, evaluation, plotting) stays in requirements-dev.txt.
+scikit-learn>=1.5
+scipy>=1.14
+numpy>=1.26
+joblib>=1.4
+
 # --- CLI ------------------------------------------------------------------
 typer>=0.15
 rich>=13.9

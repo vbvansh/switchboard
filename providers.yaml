@@ -56,6 +56,8 @@ providers:
         input_per_mtok: 0.10
         output_per_mtok: 0.40
         context_window: 32768
+        benchmark_alias: llama-3-8b-instruct-lite
+        typical_latency_s: 1.2
 
       - id: qwen2.5:3b
         tier: T1
@@ -63,6 +65,8 @@ providers:
         input_per_mtok: 0.25
         output_per_mtok: 1.25
         context_window: 32768
+        benchmark_alias: gemma-2-9b-it
+        typical_latency_s: 2.0
 
       - id: qwen3:4b
         tier: T2
@@ -81,6 +85,11 @@ providers:
         input_per_mtok: 3.00
         output_per_mtok: 15.00
         context_window: 32768
+        # Lets a router trained on public benchmarks drive this model. The
+        # hosted `qwen2.5-7b-instruct` is the same family, not the same
+        # binary - an approximation, and deliberately a visible one.
+        benchmark_alias: qwen2.5-7b-instruct
+        typical_latency_s: 6.5
 
       - id: stable-code:3b-code-q4_0
         tier: T0-code

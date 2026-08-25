@@ -77,6 +77,14 @@ class ModelSpec:
     stands_in_for: str = ""
     emits_thinking: bool = False
     simulated_pricing: bool = False
+    # Which public-benchmark model this one stands in for, so a router trained
+    # on benchmark data can drive it. `qwen2.5:7b` from a local Ollama is not
+    # byte-identical to `qwen2.5-7b-instruct` from a hosted provider, so this
+    # is an approximation - and a documented one.
+    benchmark_alias: str = ""
+    # Expected seconds per request, used to honour latency limits. Populate it
+    # from your own ledger once you have traffic.
+    typical_latency_s: float | None = None
 
     def cost(self, prompt_tokens: int, completion_tokens: int) -> float:
         return (
@@ -233,6 +241,12 @@ class ModelCatalog:
                 stands_in_for=model.get("stands_in_for", ""),
                 emits_thinking=bool(model.get("emits_thinking", False)),
                 simulated_pricing=simulated,
+                benchmark_alias=model.get("benchmark_alias", ""),
+                typical_latency_s=(
+                    float(model["typical_latency_s"])
+                    if model.get("typical_latency_s") is not None
+                    else None
+                ),
             )
             for model in entry.get("models") or []
         ]

@@ -32,6 +32,16 @@ class Settings(BaseSettings):
     # router lands, this serves every request.
     default_model: str = "qwen2.5:3b"
 
+    # A trained router artifact. When set and loadable, `model: "auto"`
+    # routes; otherwise it falls back to `default_model` and says so in
+    # /health. A stale artifact must never take the service down.
+    router_path: str = "data/router.joblib"
+
+    # Minimum predicted chance of success before a model is accepted. Raising
+    # it escalates more often: more accuracy, more cost. Callers can override
+    # per request with the X-Switchboard-Min-Quality header.
+    router_min_quality: float = 0.5
+
     # Refuse to start if any enabled provider is not on this machine.
     #
     # Off by default, because talking to providers is the point of the product.

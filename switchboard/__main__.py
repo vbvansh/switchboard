@@ -21,10 +21,12 @@ users_cli = typer.Typer(help="Manage developers and their budgets.")
 eval_cli = typer.Typer(help="Measure routing strategies against known answers.")
 db_cli = typer.Typer(help="Database schema management.")
 bench_cli = typer.Typer(help="Public routing benchmarks: real models, real costs.")
+router_cli = typer.Typer(help="Train and inspect the live routing model.")
 cli.add_typer(users_cli, name="users")
 cli.add_typer(eval_cli, name="eval")
 cli.add_typer(db_cli, name="db")
 cli.add_typer(bench_cli, name="bench")
+cli.add_typer(router_cli, name="router")
 
 console = Console()
 
@@ -1471,6 +1473,169 @@ def bench_sla(
     stem = f"sla-{source}" + (f"-{suite}" if suite else "")
     table.to_csv(out_path / f"{stem}.csv")
     console.print(f"\nWrote [cyan]{out_path / f'{stem}.csv'}[/cyan]")
+
+
+# --- Router artifacts ------------------------------------------------------
+
+
+@router_cli.command("train")
+def router_train(
+    source: str = typer.Argument("llmrouterbench", help="Benchmark to train on."),
+    suite: str = typer.Option("mmlupro", help="Benchmark suite."),
+    models: str = typer.Option("", help="Comma-separated models to train over."),
+    features: str = typer.Option("tfidf", help="surface | tfidf | embedding."),
+    test_size: float = typer.Option(0.3, help="Fraction held out for scoring."),
+    seed: int = typer.Option(0, help="Seed for the split and the classifiers."),
+    out: str = typer.Option("", help="Where to write the artifact."),
+) -> None:
+    """Train a router and save it for the server to load.
+
+    The artifact learns over BENCHMARK model names. Your catalog almost
+    certainly uses different ones, so each model in providers.yaml declares a
+    `benchmark_alias` saying which benchmark model it stands in for. Run
+    `switchboard router info` afterwards to see what actually mapped.
+    """
+    _require_eval()
+    from eval import benchmarks
+    from eval.benchmarks import learned
+    from eval.benchmarks.features import FeatureExtractor
+    from switchboard.routing import artifact as artifact_mod
+
+    if not benchmarks.is_cached(source):
+        console.print(
+            f"[red]{source} is not cached.[/red] "
+            f"Run: switchboard bench build {source}"
+        )
+        raise typer.Exit(code=1)
+
+    frame = benchmarks.load(source)
+    if suite:
+        frame = frame.filter(benchmark=suite)
+    if models:
+        frame = frame.filter(models=[m.strip() for m in models.split(",") if m.strip()])
+
+    grid = frame.grid()
+    if grid.n_queries < 50:
+        console.print(f"[red]Only {grid.n_queries} complete questions.[/red]")
+        _explain_empty_grid(frame)
+        raise typer.Exit(code=1)
+
+    query_table = benchmarks.load_queries(source)
+    texts = {
+        (row.benchmark, row.query_id): row.query for row in query_table.itertuples()
+    }
+
+    train_index, test_index = learned.split_questions(grid, test_size, seed)
+    train_grid, test_grid = grid.subset(train_index), grid.subset(test_index)
+
+    console.print(
+        f"Training on [cyan]{len(train_index):,}[/cyan] questions over "
+        f"[cyan]{len(grid.models)}[/cyan] models ..."
+    )
+    predictor = learned.SuccessPredictor.train(
+        train_grid, texts, FeatureExtractor(mode=features), seed=seed
+    )
+
+    # Scored on held-out questions so the recorded AUC is honest.
+    report = learned.training_report(predictor, test_grid, texts)
+    mean_auc = float(report["auc"].mean())
+
+    metadata = artifact_mod.RouterMetadata(
+        source=source,
+        benchmark=suite,
+        features=predictor.extractor.describe(),
+        models=list(grid.models),
+        n_train_questions=len(train_index),
+        mean_auc=mean_auc,
+    )
+
+    destination = Path(out) if out else Path(settings.router_path)
+    artifact_mod.save(destination, predictor, metadata)
+
+    colour = "green" if mean_auc >= 0.65 else "yellow" if mean_auc >= 0.55 else "red"
+    console.print(
+        f"[green]Saved[/green] {destination}\n"
+        f"  {metadata.describe()}\n"
+        f"  held-out AUC: [{colour}]{mean_auc:.3f}[/{colour}] "
+        f"(0.5 = guessing)"
+    )
+
+    # Show immediately whether this artifact can drive the local catalog -
+    # finding out at server start would be a worse time.
+    _report_router_mapping(metadata.models)
+
+
+@router_cli.command("info")
+def router_info(
+    path: str = typer.Option("", help="Artifact to inspect."),
+) -> None:
+    """Show what a router was trained on, and which local models it can drive."""
+    from switchboard.routing import artifact as artifact_mod
+
+    target = Path(path) if path else Path(settings.router_path)
+    metadata = artifact_mod.read_metadata(target)
+
+    if metadata is None:
+        if not target.exists():
+            console.print(
+                f"[yellow]No router at {target}.[/yellow]\n"
+                "Train one with: [cyan]switchboard router train[/cyan]"
+            )
+            raise typer.Exit(code=1)
+        console.print(f"[yellow]{target} has no readable metadata sidecar.[/yellow]")
+        raise typer.Exit(code=1)
+
+    console.print(f"Artifact: [cyan]{target}[/cyan]")
+    console.print(f"  {metadata.describe()}")
+    colour = (
+        "green"
+        if metadata.mean_auc >= 0.65
+        else "yellow"
+        if metadata.mean_auc >= 0.55
+        else "red"
+    )
+    console.print(f"  held-out AUC: [{colour}]{metadata.mean_auc:.3f}[/{colour}]\n")
+
+    _report_router_mapping(metadata.models)
+
+
+def _report_router_mapping(trained_models: list[str]) -> None:
+    """Which trained models map onto something this catalog can actually serve."""
+    from switchboard.providers import ProviderPool
+    from switchboard.routing.live import build_model_map
+
+    catalog = _catalog()
+    try:
+        pool = ProviderPool(catalog, local_only=settings.local_only)
+        available = pool.available_models()
+    except Exception:  # noqa: BLE001 - inspection must not depend on providers
+        available = list(catalog.models)
+
+    mapping = build_model_map(catalog, trained_models, available)
+
+    table = Table(title="Trained model -> local model")
+    table.add_column("Benchmark model")
+    table.add_column("Serves as")
+    for name in sorted(trained_models):
+        local = mapping.get(name)
+        table.add_row(
+            name,
+            f"[green]{local}[/green]" if local else "[dim]not mapped[/dim]",
+        )
+    console.print(table)
+
+    if len(mapping) >= 2:
+        console.print(
+            f"[green]Routing will be enabled[/green] over "
+            f"{', '.join(sorted(mapping.values()))}."
+        )
+    else:
+        console.print(
+            f"[yellow]Routing will be DISABLED[/yellow] - only {len(mapping)} "
+            "model mapped, and at least 2 are needed.\n"
+            "Add `benchmark_alias:` to models in providers.yaml to say which "
+            "benchmark model each one stands in for."
+        )
 
 
 if __name__ == "__main__":

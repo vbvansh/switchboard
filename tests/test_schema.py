@@ -14,6 +14,7 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import create_engine, inspect
+from sqlalchemy import text as sa_text
 
 from switchboard import schema
 from switchboard.ledger.models import Base
@@ -121,15 +122,34 @@ def test_downgrade_removes_the_tables(db_url: str) -> None:
 def test_stamping_marks_an_existing_database_without_touching_it(
     db_url: str,
 ) -> None:
-    """Databases created before migrations existed must survive the upgrade."""
+    """Databases created before migrations existed must survive the upgrade.
+
+    The simulation matters. `create_all` would build tables from TODAY's
+    models, which already contain columns added by later migrations - stamping
+    that at 0001 would claim a shape the database does not have, and the next
+    upgrade would fail trying to add a column that is already there.
+
+    A real pre-migrations database has the ORIGINAL shape and no version stamp,
+    so that is what gets built here: migrate to 0001, then remove the stamp.
+    """
+    schema.upgrade(db_url, revision="0001")
+
     engine = create_engine(db_url)
-    Base.metadata.create_all(engine)  # simulate a pre-migrations install
-    engine.dispose()
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa_text("DROP TABLE alembic_version"))
+    finally:
+        engine.dispose()
 
     assert schema.status(db_url).unmanaged is True
 
     schema.stamp(db_url, "0001")
-    assert schema.status(db_url).up_to_date
+    state = schema.status(db_url)
+    assert state.unmanaged is False
+    assert state.current == "0001"
 
-    # And the guard is satisfied without any migration having run.
+    # Stamping only records where the database already is. Migrations written
+    # since the baseline are still pending, and `db upgrade` applies them
+    # without recreating the tables that already exist.
+    schema.upgrade(db_url)
     schema.require_up_to_date(db_url)

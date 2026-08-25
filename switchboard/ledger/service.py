@@ -202,6 +202,7 @@ class LedgerService:
         status: str = STATUS_OK,
         error_detail: str | None = None,
         messages: list | None = None,
+        routing_reason: str | None = None,
     ) -> RequestLog:
         cost = self._prices.cost(served_model, prompt_tokens, completion_tokens)
         baseline = self._prices.baseline_cost(prompt_tokens, completion_tokens)
@@ -226,6 +227,7 @@ class LedgerService:
             caused_model_switch=switched,
             status=status,
             error_detail=error_detail,
+            routing_reason=routing_reason,
             prompt_json=(
                 json.dumps(messages, ensure_ascii=False)
                 if self._store_prompts and messages is not None

@@ -189,10 +189,24 @@ def test_dockerignore_excludes_secrets_and_local_data() -> None:
 
 
 def test_runtime_requirements_exclude_the_research_stack() -> None:
-    """The server image should not carry tools it never runs."""
+    """The server image should not carry tools it never runs.
+
+    scikit-learn is deliberately NOT on this list any more. Since C.4 the
+    server loads a trained router and runs inference on every `auto` request,
+    so it is genuinely a runtime dependency. What stays out is the research
+    stack - plotting, dataset downloads, feature engineering, tests - none of
+    which a serving process touches.
+    """
     runtime = (PROJECT_ROOT / "requirements.txt").read_text().lower()
-    for heavy in ("matplotlib", "scikit-learn", "datasets", "pytest", "fastembed"):
+    for heavy in ("matplotlib", "datasets", "pytest", "fastembed", "pandas"):
         assert heavy not in runtime, f"{heavy} belongs in requirements-dev.txt"
+
+
+def test_runtime_requirements_include_what_routing_needs() -> None:
+    """Inference happens in the server, so its dependencies must ship with it."""
+    runtime = (PROJECT_ROOT / "requirements.txt").read_text().lower()
+    for needed in ("scikit-learn", "joblib", "numpy"):
+        assert needed in runtime, f"{needed} is needed to load and run a router"
 
 
 def test_runtime_requirements_cover_what_the_server_imports() -> None:

@@ -16,8 +16,8 @@ provider is off-machine.
 
 ## Status
 
-**Routing is not implemented yet** — every request still goes to one fixed
-model. Everything the router will need is in place. What works today:
+`model: "auto"` routes to the cheapest model predicted to answer correctly,
+subject to per-request latency, cost and quality limits. What works today:
 
 - `POST /v1/chat/completions`, streaming and non-streaming
 - Drop-in compatibility with any OpenAI client via `base_url`
@@ -27,12 +27,13 @@ model. Everything the router will need is in place. What works today:
 - Docker image, PostgreSQL support, liveness/readiness probes
 - Schema migrations — upgrades never destroy your data
 - Offline evaluation against 696k recorded answers from real models
+- Learned routing in the live API, with an auditable reason per request
 
 | Phase | | |
 |---|---|---|
 | A | Foundations: licence, privacy, migrations, providers, Docker | done |
 | B | Real benchmark data | done |
-| C | The routing brain | router, cascades, SLAs done; live wiring next |
+| C | The routing brain | done — routing is live |
 | D | Caching, failover, retries, metrics | |
 | E | Shadow mode + dashboard | |
 | F | Guardrails, docs, write-up | |
@@ -250,6 +251,55 @@ but were measured at roughly **0.5 texts/second** on the development machine —
 a 17-minute run that never finished. TF-IDF fits thousands of questions in
 under a second and the whole experiment takes 12 seconds. On a machine with a
 GPU, use embeddings.
+
+### Routing in the live API
+
+`model: "auto"` now routes. Train an artifact, and the server loads it at
+startup:
+
+```powershell
+python -m switchboard router train xroutebench
+python -m switchboard router info
+python -m switchboard serve
+```
+
+Per-request limits arrive as headers, so the body stays a valid OpenAI request:
+
+| Header | Effect |
+|---|---|
+| `X-Switchboard-Max-Latency` | seconds; models slower than this are excluded |
+| `X-Switchboard-Min-Quality` | minimum predicted chance of success |
+| `X-Switchboard-Max-Cost` | per-request budget cap |
+
+`/health` reports whether routing is on, which models it can drive, and what it
+was trained on. Every request records its `routing_reason` in the ledger, so a
+decision that looks wrong can be explained after the fact.
+
+**Name mapping.** A router trained on public benchmarks knows
+`qwen2.5-7b-instruct`; your catalog has `qwen2.5:7b`. Each model in
+`providers.yaml` declares `benchmark_alias` to say which benchmark model it
+stands in for. `switchboard router info` shows what mapped and what did not.
+With fewer than two models mapped, routing stays off and says why — a stale
+artifact must never take the service down.
+
+#### An honest limitation
+
+A benchmark-trained router **does not transfer to short chat prompts.**
+
+```
+trained-shaped prompts (709 chars avg):  p spans 0.02–0.88, 38% below threshold
+short chat prompts      (34 chars avg):  p clusters 0.67–0.87, no discrimination
+```
+
+Measured on its own distribution the classifier works (held-out AUC 0.800).
+Shown a 34-character question it has never seen anything like, it returns
+roughly the same probability for every model and everything goes to the
+cheapest one.
+
+This is distribution shift, not a broken model, and it is only visible once the
+router is wired to real traffic — which is the argument for doing C.4 rather
+than trusting the offline table. The fix is to train on the traffic you
+actually serve; the ledger already records what it needs for that.
 
 ## Hardware note
 

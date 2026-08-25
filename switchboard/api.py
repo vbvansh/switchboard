@@ -40,6 +40,8 @@ from switchboard.ledger import (
 from switchboard.ledger.keys import extract_bearer_token
 from switchboard.ledger.service import estimate_tokens
 from switchboard.providers import Provider, ProviderPool, ProviderUnavailable
+from switchboard.routing.base import RoutingContext
+from switchboard.routing.live import RequestLimits, build_router
 from switchboard.schema import require_up_to_date
 from switchboard.streaming import UsageSniffer, request_usage_in_stream
 
@@ -54,10 +56,15 @@ async def lifespan(app: FastAPI):
     catalog = ModelCatalog.load(settings.providers_file)
     database = Database(settings.database_url)
 
+    pool = ProviderPool(catalog, local_only=settings.local_only)
+
     app.state.catalog = catalog
-    app.state.pool = ProviderPool(catalog, local_only=settings.local_only)
+    app.state.pool = pool
     app.state.database = database
     app.state.ledger = LedgerService(database, catalog, settings.store_prompts)
+    # A missing or stale router must never stop the server: requests fall back
+    # to the default model and /health says routing is off.
+    app.state.router = build_router(catalog, pool.available_models())
     try:
         yield
     finally:
@@ -89,16 +96,32 @@ def _identify(request: Request) -> User:
     return request.app.state.ledger.authenticate(token)
 
 
-def _resolve_model(payload: dict[str, Any]) -> str:
-    """Decide which model serves this request.
+def _resolve_model(
+    request: Request, payload: dict[str, Any]
+) -> tuple[str, str | None]:
+    """Decide which model serves this request, and why.
 
-    Still returns the fixed default for `auto`. This function is the single
-    seam the routing strategies replace.
+    An explicit model name is always honoured - callers who name a model get
+    that model, which is what makes per-model benchmarking possible and what
+    keeps the proxy a faithful OpenAI endpoint.
+
+    `auto` hands the choice to the router. With no usable router, that means
+    the configured default, and the reason says so rather than pretending a
+    decision was made.
     """
     requested = payload.get("model")
-    if not requested or requested == AUTO_MODEL:
-        return settings.default_model
-    return str(requested)
+    if requested and requested != AUTO_MODEL:
+        return str(requested), None
+
+    router = getattr(request.app.state, "router", None)
+    if router is None or not router.enabled:
+        return settings.default_model, "routing unavailable; used default_model"
+
+    limits = RequestLimits.from_headers(request.headers)
+    decision = router.choose(
+        RoutingContext(messages=payload.get("messages") or []), limits
+    )
+    return decision.model, decision.reason
 
 
 def _usage_from_body(body: bytes) -> tuple[int, int] | None:
@@ -128,6 +151,26 @@ def _prompt_text(messages: Any) -> str:
 
 
 # --- Endpoints -------------------------------------------------------------
+
+
+def _routing_status(request: Request) -> dict[str, Any]:
+    router = getattr(request.app.state, "router", None)
+    if router is None:
+        return {"enabled": False, "reason": "no router artifact loaded"}
+    if not router.enabled:
+        return {
+            "enabled": False,
+            "reason": (
+                "the router was trained for models this catalog cannot serve; "
+                "add `benchmark_alias` entries in providers.yaml"
+            ),
+            "trained_for": router.metadata.models,
+        }
+    return {
+        "enabled": True,
+        "models": router.routable_models,
+        "trained": router.metadata.describe(),
+    }
 
 
 @app.get("/health/live")
@@ -186,6 +229,7 @@ async def health(request: Request) -> dict[str, Any]:
         "unconfigured_providers": pool.unconfigured(),
         "available_models": pool.available_models(),
         "default_model": settings.default_model,
+        "routing": _routing_status(request),
         "local_only": settings.local_only,
         "store_prompts": settings.store_prompts,
         "simulated_pricing": catalog.has_simulated_pricing,
@@ -247,7 +291,7 @@ async def chat_completions(request: Request) -> Response:
         return _error(401, str(exc), "authentication_error")
 
     requested_model = str(payload.get("model") or AUTO_MODEL)
-    served_model = _resolve_model(payload)
+    served_model, routing_reason = _resolve_model(request, payload)
     messages = payload.get("messages")
 
     def record(status: str, **kwargs) -> None:
@@ -261,6 +305,7 @@ async def chat_completions(request: Request) -> Response:
             latency_ms=0,
             status=status,
             messages=messages,
+            routing_reason=routing_reason,
             **kwargs,
         )
 
@@ -291,6 +336,7 @@ async def chat_completions(request: Request) -> Response:
             served_model=served_model,
             messages=messages,
             started=started,
+            routing_reason=routing_reason,
         )
 
     try:
@@ -323,6 +369,7 @@ async def chat_completions(request: Request) -> Response:
         status=STATUS_OK if upstream.status_code < 400 else STATUS_PROVIDER_ERROR,
         error_detail=None if upstream.status_code < 400 else upstream.text[:500],
         messages=messages,
+        routing_reason=routing_reason,
     )
 
     return Response(
@@ -342,6 +389,7 @@ async def _serve_streaming(
     served_model: str,
     messages: Any,
     started: float,
+    routing_reason: str | None = None,
 ) -> Response:
     """Stream the answer through untouched, accounting for it as it passes."""
     stream = provider.stream_chat_completion(payload)
@@ -362,6 +410,7 @@ async def _serve_streaming(
             status=STATUS_PROVIDER_ERROR,
             error_detail=str(exc),
             messages=messages,
+            routing_reason=routing_reason,
         )
         return _error(503, str(exc), "provider_unavailable")
     except StopAsyncIteration:
@@ -398,6 +447,7 @@ async def _serve_streaming(
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 status=STATUS_OK,
                 messages=messages,
+                routing_reason=routing_reason,
             )
 
     return StreamingResponse(body(), media_type="text/event-stream")
