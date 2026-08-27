@@ -43,6 +43,11 @@ class User(Base):
     api_key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
 
     monthly_budget_usd: Mapped[float] = mapped_column(Float, default=50.0)
+    # Requests per minute. NULL means use the server-wide default, so an
+    # operator can raise the default without editing every user row.
+    requests_per_minute: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

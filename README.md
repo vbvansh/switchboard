@@ -28,14 +28,15 @@ subject to per-request latency, cost and quality limits. What works today:
 - Schema migrations — upgrades never destroy your data
 - Offline evaluation against 696k recorded answers from real models
 - Learned routing in the live API, with an auditable reason per request
-- Response caching and automatic retries on transient provider failures
+- Response caching, retries, provider failover with a circuit breaker
+- Per-user rate limiting and a Prometheus `/metrics` endpoint
 
 | Phase | | |
 |---|---|---|
 | A | Foundations: licence, privacy, migrations, providers, Docker | done |
 | B | Real benchmark data | done |
 | C | The routing brain | done — routing is live |
-| D | Caching + retries done; failover, rate limits, metrics next |  |
+| D | Caching, retries, failover, rate limits, metrics | done |
 | E | Shadow mode + dashboard | |
 | F | Guardrails, docs, write-up | |
 
@@ -536,6 +537,78 @@ time and, on a paid provider, money. A `Retry-After` header from the provider
 wins over our own backoff, clamped so a very long one cannot hold a request
 open indefinitely. Jitter matters: without it every client that failed during
 an outage retries in the same instant and knocks the provider over again.
+
+## Reliability: failover, rate limits, metrics
+
+### Failover
+
+Several providers may serve the same model. Declare it more than once in
+`providers.yaml` and the extras become backups, tried in the order they appear:
+
+```yaml
+- id: groq
+  models: [{id: llama-3.3-70b, ...}]      # preferred
+- id: together
+  models: [{id: llama-3.3-70b, ...}]      # backup
+```
+
+A provider that raises, or returns a 5xx, is recorded as failed and the next
+one is tried. A **4xx is not a failover** — the request itself is wrong, and
+every other provider would reject it identically. Retrying it elsewhere would
+multiply the cost of one bad request by the number of providers configured.
+
+### Circuit breaker
+
+Retries handle a blip; a breaker handles an outage. Without one, every request
+to a dead provider waits for its full timeout before failing over — with a
+60-second timeout and an hour-long outage, that is an hour of 60-second waits
+for answers that were never coming.
+
+After five **consecutive** failures a provider is skipped for 30 seconds, then
+one trial request is allowed through. Success restores normal service; failure
+starts the cooldown again. Only consecutive failures count, so a provider that
+fails once an hour is never tripped.
+
+A tripped provider moves to the **back** of the list rather than out of it: if
+everything is failing, trying a dead provider still beats having nowhere to
+send the request. `/health` reports the state of every circuit.
+
+### Rate limiting
+
+A monthly budget does not stop someone spending it in ninety seconds. A runaway
+retry loop can burn a month's allowance before anyone notices, and hammer the
+provider hard enough to get the whole organisation throttled.
+
+Requests are counted in a **sliding** sixty-second window, per user. A fixed
+window would let someone send a full allowance at 11:59:59 and another at
+12:00:00 — twice the intended rate, in one second, entirely within the rules.
+
+Refused requests get `429` with `Retry-After`, and are refused **before** any
+provider is called. Per-user overrides live in the database; the default is
+`SWITCHBOARD_RATE_LIMIT_PER_MINUTE`.
+
+The counter is per process, so two instances behind a load balancer together
+allow twice the limit. Making it exact needs Redis — a whole extra service for
+a guard rail whose job is catching runaway loops, not metering billing.
+
+### Metrics
+
+`GET /metrics` serves the Prometheus text format. No credentials: metrics carry
+no prompt text, no keys and no user identities, and a scrape endpoint that
+needs a key is one nobody configures.
+
+```
+switchboard_requests_total{status="ok"}
+switchboard_cache_events_total{event="hit"}
+switchboard_provider_attempts_total{provider="groq",outcome="5xx"}
+switchboard_failovers_total{to="together"}
+switchboard_request_duration_seconds_bucket{model="...",le="0.5"}
+```
+
+Labels are drawn only from small fixed sets — a status, a provider, a model.
+Never a user id or a request id: every distinct label combination becomes a
+time series stored forever, and labelling by user is a well-known way to take
+a monitoring system down with your own observability code.
 
 ## Health endpoints
 

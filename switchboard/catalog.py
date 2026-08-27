@@ -140,6 +140,9 @@ class ModelCatalog:
     baseline_model: str
     ladder: tuple[str, ...]
     default_pricing: ModelSpec
+    #: model id -> every provider declaring it, in file order. The first is
+    #: preferred; the rest are failover targets.
+    alternatives: dict[str, list[ModelSpec]] = field(default_factory=dict)
     _warned: set[str] = field(default_factory=set, repr=False, compare=False)
 
     # --- Loading -----------------------------------------------------------
@@ -165,6 +168,8 @@ class ModelCatalog:
         raw = _expand_tree(raw)
         providers: dict[str, ProviderSpec] = {}
         models: dict[str, ModelSpec] = {}
+        # model id -> every declaration of it, in file order.
+        alternatives: dict[str, list[ModelSpec]] = {}
 
         for entry in raw.get("providers") or []:
             provider, provider_models = cls._parse_provider(entry, source)
@@ -175,14 +180,13 @@ class ModelCatalog:
             providers[provider.id] = provider
 
             for model in provider_models:
-                if model.id in models:
-                    raise CatalogError(
-                        f"{source}: model {model.id!r} is declared by both "
-                        f"{models[model.id].provider_id!r} and "
-                        f"{model.provider_id!r}. Routing could not choose "
-                        "between them."
-                    )
-                models[model.id] = model
+                # Several providers MAY serve the same model - that is what
+                # makes failover possible. The first declaration wins for
+                # pricing and routing; the rest become backups, tried in the
+                # order they appear in the file.
+                alternatives.setdefault(model.id, []).append(model)
+                if model.id not in models:
+                    models[model.id] = model
 
         default = cls._parse_default_pricing(raw.get("default_pricing") or {})
         baseline = raw.get("baseline_model")
@@ -208,6 +212,7 @@ class ModelCatalog:
             baseline_model=baseline,
             ladder=ladder,
             default_pricing=default,
+            alternatives=alternatives,
         )
         catalog._validate_ladder_order(source)
         return catalog
@@ -312,6 +317,19 @@ class ModelCatalog:
     def provider_for(self, model: str) -> ProviderSpec | None:
         spec = self.models.get(model)
         return self.providers.get(spec.provider_id) if spec else None
+
+    def providers_for(self, model: str) -> list[ProviderSpec]:
+        """Every provider that can serve this model, preferred first.
+
+        More than one is the point: when the first is down or rate-limiting,
+        the request moves to the next instead of failing.
+        """
+        found = []
+        for spec in self.alternatives.get(model, []):
+            provider = self.providers.get(spec.provider_id)
+            if provider is not None:
+                found.append(provider)
+        return found
 
     def cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
         return self.for_model(model).cost(prompt_tokens, completion_tokens)

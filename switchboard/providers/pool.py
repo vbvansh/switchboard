@@ -16,6 +16,7 @@ from switchboard.providers.base import (
     ProviderNotConfigured,
     ProviderUnavailable,
 )
+from switchboard.providers.breaker import CircuitBreaker
 from switchboard.providers.openai_compatible import OpenAICompatibleProvider
 from switchboard.providers.retry import RetryPolicy
 
@@ -37,9 +38,11 @@ class ProviderPool:
         catalog: ModelCatalog,
         local_only: bool = False,
         retry: RetryPolicy | None = None,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         self._catalog = catalog
         self._retry = retry or RetryPolicy()
+        self.breaker = breaker or CircuitBreaker()
         self._providers: dict[str, Provider] = {}
         self._unconfigured: dict[str, str] = {}
 
@@ -92,6 +95,25 @@ class ProviderPool:
                 f"usable: {reason}"
             )
         return provider
+
+    def providers_for(self, model: str) -> list[Provider]:
+        """Every usable provider for this model, preferred first.
+
+        Providers whose circuit is open are moved to the BACK rather than
+        dropped. If every provider is failing, a request that tries a dead one
+        is still better than a request with nowhere to go.
+        """
+        specs = self._catalog.providers_for(model)
+        if not specs:
+            return []
+
+        healthy, tripped = [], []
+        for spec in specs:
+            provider = self._providers.get(spec.id)
+            if provider is None:
+                continue
+            (healthy if self.breaker.allows(spec.id) else tripped).append(provider)
+        return healthy + tripped
 
     def get(self, provider_id: str) -> Provider | None:
         return self._providers.get(provider_id)

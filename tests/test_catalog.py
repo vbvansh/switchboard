@@ -116,20 +116,30 @@ def test_duplicate_provider_ids_are_rejected() -> None:
         )
 
 
-def test_a_model_claimed_by_two_providers_is_rejected() -> None:
-    """Routing would have no way to choose between them."""
+def test_a_model_may_be_served_by_several_providers() -> None:
+    """This used to be an error. It is now the failover feature.
+
+    When two providers offer the same model, the first declaration wins for
+    pricing and routing and the rest become backups, tried in file order when
+    the primary is down.
+    """
     second = {
         "id": "other",
         "type": "openai-compatible",
         "base_url": "http://localhost:9999/v1",
+        "enabled": True,
         "models": [
-            {"id": "small", "tier": "T0", "input_per_mtok": 1, "output_per_mtok": 2}
+            {"id": "small", "tier": "T0", "input_per_mtok": 99, "output_per_mtok": 99}
         ],
     }
-    with pytest.raises(CatalogError, match="declared by both"):
-        ModelCatalog.from_dict(
-            {**MINIMAL, "providers": [MINIMAL["providers"][0], second]}
-        )
+    catalog = ModelCatalog.from_dict(
+        {**MINIMAL, "providers": [MINIMAL["providers"][0], second]}
+    )
+
+    assert [p.id for p in catalog.providers_for("small")] == ["local", "other"]
+    # The first declaration is the one priced and routed on.
+    assert catalog.models["small"].provider_id == "local"
+    assert catalog.cost("small", 1_000_000, 0) == pytest.approx(1.0)
 
 
 def test_missing_required_provider_field_is_rejected() -> None:

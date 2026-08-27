@@ -54,6 +54,19 @@ class Settings(BaseSettings):
     retry_attempts: int = 3
     retry_base_delay_s: float = 0.5
 
+    # --- Rate limiting ------------------------------------------------------
+    # Requests per minute per user. A monthly budget does not stop someone
+    # spending it in ninety seconds; this does. Set to 0 to disable.
+    # Individual users can be given a different limit in the database.
+    rate_limit_per_minute: int = 60
+
+    # --- Failover -----------------------------------------------------------
+    # Consecutive failures before a provider is skipped, and for how long.
+    # Without this, every request to a dead provider waits for its full
+    # timeout before failing over. Set the threshold to 0 to disable.
+    breaker_failure_threshold: int = 5
+    breaker_cooldown_s: float = 30.0
+
     # Refuse to start if any enabled provider is not on this machine.
     #
     # Off by default, because talking to providers is the point of the product.

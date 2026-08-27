@@ -25,6 +25,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from switchboard import metrics as metrics_mod
 from switchboard.cache import ResponseCache, cache_key, is_cacheable
 from switchboard.catalog import ModelCatalog
 from switchboard.config import AUTO_MODEL, settings
@@ -42,7 +43,9 @@ from switchboard.ledger import (
 from switchboard.ledger.keys import extract_bearer_token
 from switchboard.ledger.service import estimate_tokens
 from switchboard.providers import Provider, ProviderPool, ProviderUnavailable
+from switchboard.providers.breaker import CircuitBreaker
 from switchboard.providers.retry import RetryPolicy
+from switchboard.ratelimit import RateLimiter
 from switchboard.routing.base import RoutingContext
 from switchboard.routing.live import RequestLimits, build_router
 from switchboard.schema import require_up_to_date
@@ -63,7 +66,13 @@ async def lifespan(app: FastAPI):
         attempts=settings.retry_attempts,
         base_delay_s=settings.retry_base_delay_s,
     )
-    pool = ProviderPool(catalog, local_only=settings.local_only, retry=retry)
+    breaker = CircuitBreaker(
+        failure_threshold=settings.breaker_failure_threshold,
+        cooldown_s=settings.breaker_cooldown_s,
+    )
+    pool = ProviderPool(
+        catalog, local_only=settings.local_only, retry=retry, breaker=breaker
+    )
 
     app.state.catalog = catalog
     app.state.pool = pool
@@ -75,6 +84,8 @@ async def lifespan(app: FastAPI):
     app.state.cache = ResponseCache(
         max_entries=settings.cache_max_entries, ttl_s=settings.cache_ttl_s
     )
+    app.state.limiter = RateLimiter(settings.rate_limit_per_minute)
+    app.state.metrics = metrics_mod.build_registry()
     try:
         yield
     finally:
@@ -183,6 +194,21 @@ def _routing_status(request: Request) -> dict[str, Any]:
     }
 
 
+@app.get("/metrics")
+async def prometheus_metrics(request: Request) -> Response:
+    """Scrape target for a monitoring system.
+
+    Open, like the health endpoints. Metrics carry no prompt text, no keys and
+    no user identities, and a scrape endpoint that needs credentials is one
+    nobody gets round to configuring.
+    """
+    registry = request.app.state.metrics
+    registry.set_gauge("switchboard_cache_entries", len(request.app.state.cache))
+    return Response(
+        content=registry.render(), media_type="text/plain; version=0.0.4"
+    )
+
+
 @app.get("/health/live")
 async def liveness() -> dict[str, str]:
     """Is this process alive? Nothing else.
@@ -241,6 +267,8 @@ async def health(request: Request) -> dict[str, Any]:
         "default_model": settings.default_model,
         "routing": _routing_status(request),
         "cache": request.app.state.cache.as_dict(),
+        "rate_limit": request.app.state.limiter.snapshot(),
+        "circuits": request.app.state.pool.breaker.snapshot(),
         "local_only": settings.local_only,
         "store_prompts": settings.store_prompts,
         "simulated_pricing": catalog.has_simulated_pricing,
@@ -301,6 +329,28 @@ async def chat_completions(request: Request) -> Response:
     except AuthenticationError as exc:
         return _error(401, str(exc), "authentication_error")
 
+    limiter: RateLimiter = request.app.state.limiter
+    metrics = request.app.state.metrics
+    verdict = limiter.check(user.id, user.requests_per_minute)
+    if not verdict.allowed:
+        # Refused before any work is done. A rate limit that only applied
+        # after the provider call would not protect the provider at all.
+        metrics.increment(metrics_mod.RATE_LIMITED)
+        metrics.increment(metrics_mod.REQUESTS, status="rate_limited")
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": {
+                    "message": (
+                        f"Rate limit of {verdict.limit} requests per minute "
+                        f"exceeded. Retry in {verdict.retry_after_s:.0f}s."
+                    ),
+                    "type": "rate_limit_exceeded",
+                }
+            },
+            headers=verdict.headers(),
+        )
+
     requested_model = str(payload.get("model") or AUTO_MODEL)
     served_model, routing_reason = _resolve_model(request, payload)
     messages = payload.get("messages")
@@ -328,11 +378,15 @@ async def chat_completions(request: Request) -> Response:
         record(STATUS_BLOCKED_BUDGET, error_detail=str(exc))
         return _error(402, str(exc), "insufficient_quota")
 
-    try:
-        provider = pool.for_model(served_model)
-    except ProviderUnavailable as exc:
-        record(STATUS_PROVIDER_ERROR, error_detail=str(exc))
-        return _error(503, str(exc), "provider_unavailable")
+    candidates = pool.providers_for(served_model)
+    if not candidates:
+        try:
+            candidates = [pool.for_model(served_model)]
+        except ProviderUnavailable as exc:
+            record(STATUS_PROVIDER_ERROR, error_detail=str(exc))
+            metrics.increment(metrics_mod.REQUESTS, status="no_provider")
+            return _error(503, str(exc), "provider_unavailable")
+    provider = candidates[0]
 
     payload["model"] = served_model
     started = time.perf_counter()
@@ -345,6 +399,8 @@ async def chat_completions(request: Request) -> Response:
 
     if key is not None:
         if (hit := cache.get(key)) is not None:
+            metrics.increment(metrics_mod.CACHE_EVENTS, event="hit")
+            metrics.increment(metrics_mod.REQUESTS, status="cached")
             ledger.record(
                 user_id=user.id,
                 requested_model=requested_model,
@@ -363,8 +419,10 @@ async def chat_completions(request: Request) -> Response:
                 media_type="application/json",
                 headers={"X-Switchboard-Cache": "hit"},
             )
+        metrics.increment(metrics_mod.CACHE_EVENTS, event="miss")
     elif not payload.get("stream"):
         cache.skip(why)
+        metrics.increment(metrics_mod.CACHE_EVENTS, event="skip")
 
     if payload.get("stream"):
         return await _serve_streaming(
@@ -379,14 +437,15 @@ async def chat_completions(request: Request) -> Response:
             routing_reason=routing_reason,
         )
 
-    try:
-        upstream = await provider.chat_completion(payload)
-    except ProviderUnavailable as exc:
-        record(
-            STATUS_PROVIDER_ERROR,
-            error_detail=str(exc),
+    upstream, provider, failure = await _call_with_failover(
+        candidates, payload, pool, metrics
+    )
+    if upstream is None:
+        record(STATUS_PROVIDER_ERROR, error_detail=failure)
+        metrics.increment(metrics_mod.REQUESTS, status="provider_error")
+        return _error(
+            503, failure or "no provider answered", "provider_unavailable"
         )
-        return _error(503, str(exc), "provider_unavailable")
 
     latency_ms = int((time.perf_counter() - started) * 1000)
     usage = _usage_from_body(upstream.content)
@@ -412,6 +471,18 @@ async def chat_completions(request: Request) -> Response:
         routing_reason=routing_reason,
     )
 
+    metrics.increment(
+        metrics_mod.REQUESTS,
+        status="ok" if upstream.status_code < 400 else "error",
+    )
+    metrics.observe(
+        metrics_mod.REQUEST_DURATION, latency_ms / 1000.0, model=served_model
+    )
+    metrics.increment(metrics_mod.TOKENS, prompt_tokens, direction="prompt")
+    metrics.increment(
+        metrics_mod.TOKENS, completion_tokens, direction="completion"
+    )
+
     if key is not None:
         cache.put(
             key,
@@ -427,6 +498,48 @@ async def chat_completions(request: Request) -> Response:
         media_type="application/json",
         headers={"X-Switchboard-Cache": "miss" if key is not None else "skip"},
     )
+
+
+async def _call_with_failover(candidates, payload, pool, metrics):
+    """Try each provider in turn. Returns (response, provider, failure).
+
+    A provider that raises, or returns a server error, is recorded as a failure
+    and the next one is tried. A 4xx is NOT a failover: the request itself is
+    wrong, and every other provider would reject it identically. Retrying it
+    elsewhere would multiply the cost of one bad request by the number of
+    providers configured.
+    """
+    failure: str | None = None
+
+    for index, provider in enumerate(candidates):
+        if index:
+            metrics.increment(metrics_mod.FAILOVERS, to=provider.id)
+
+        try:
+            response = await provider.chat_completion(payload)
+        except ProviderUnavailable as exc:
+            pool.breaker.record_failure(provider.id)
+            metrics.increment(
+                metrics_mod.PROVIDER_ATTEMPTS, provider=provider.id, outcome="error"
+            )
+            failure = str(exc)
+            continue
+
+        if response.status_code >= 500:
+            pool.breaker.record_failure(provider.id)
+            metrics.increment(
+                metrics_mod.PROVIDER_ATTEMPTS, provider=provider.id, outcome="5xx"
+            )
+            failure = f"{provider.id} returned {response.status_code}"
+            continue
+
+        pool.breaker.record_success(provider.id)
+        metrics.increment(
+            metrics_mod.PROVIDER_ATTEMPTS, provider=provider.id, outcome="ok"
+        )
+        return response, provider, None
+
+    return None, candidates[-1] if candidates else None, failure
 
 
 async def _serve_streaming(

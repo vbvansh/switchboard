@@ -95,8 +95,14 @@ class StubPool:
     """A ProviderPool that hands out one stub for every model."""
 
     def __init__(self, provider: StubProvider, catalog: ModelCatalog) -> None:
+        from switchboard.providers.breaker import CircuitBreaker
+
         self.provider = provider
         self._catalog = catalog
+        self.breaker = CircuitBreaker()
+
+    def providers_for(self, model: str) -> list:
+        return [] if self._catalog.provider_for(model) is None else [self.provider]
 
     def for_model(self, model: str):
         if self._catalog.provider_for(model) is None:
@@ -143,6 +149,8 @@ def client(
 
     from switchboard import api
     from switchboard.cache import ResponseCache
+    from switchboard.metrics import build_registry
+    from switchboard.ratelimit import RateLimiter
 
     api.app.state.pool = pool
     api.app.state.catalog = prices
@@ -150,6 +158,10 @@ def client(
     # depend on execution order.
     api.app.state.cache = ResponseCache()
     api.app.state.router = None
+    # Generous default so tests are not accidentally rate limited; the
+    # rate-limit tests set their own.
+    api.app.state.limiter = RateLimiter(default_limit=10_000)
+    api.app.state.metrics = build_registry()
     api.app.state.database = database
     api.app.state.ledger = ledger
     return TestClient(api.app)
