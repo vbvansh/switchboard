@@ -29,6 +29,7 @@ from switchboard import metrics as metrics_mod
 from switchboard.cache import ResponseCache, cache_key, is_cacheable
 from switchboard.catalog import ModelCatalog
 from switchboard.config import AUTO_MODEL, settings
+from switchboard.dashboard import DashboardData, render
 from switchboard.ledger import (
     STATUS_BLOCKED_BUDGET,
     STATUS_CACHED,
@@ -49,6 +50,7 @@ from switchboard.ratelimit import RateLimiter
 from switchboard.routing.base import RoutingContext
 from switchboard.routing.live import RequestLimits, build_router
 from switchboard.schema import require_up_to_date
+from switchboard.shadow import estimate_cost, summarise
 from switchboard.streaming import UsageSniffer, request_usage_in_stream
 
 
@@ -119,7 +121,7 @@ def _identify(request: Request) -> User:
 
 def _resolve_model(
     request: Request, payload: dict[str, Any]
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, Any]:
     """Decide which model serves this request, and why.
 
     An explicit model name is always honoured - callers who name a model get
@@ -129,20 +131,42 @@ def _resolve_model(
     `auto` hands the choice to the router. With no usable router, that means
     the configured default, and the reason says so rather than pretending a
     decision was made.
+
+    Returns (model_to_serve, reason, shadow_decision). The third value is the
+    routing decision that was NOT acted on - either because shadow mode is on,
+    or because the caller named a model explicitly. Recording it is what lets
+    an operator see what routing would have done to their real traffic.
     """
     requested = payload.get("model")
-    if requested and requested != AUTO_MODEL:
-        return str(requested), None
-
     router = getattr(request.app.state, "router", None)
+    explicit = bool(requested) and requested != AUTO_MODEL
+
     if router is None or not router.enabled:
-        return settings.default_model, "routing unavailable; used default_model"
+        if explicit:
+            return str(requested), None, None
+        return (
+            settings.default_model,
+            "routing unavailable; used default_model",
+            None,
+        )
 
     limits = RequestLimits.from_headers(request.headers)
     decision = router.choose(
         RoutingContext(messages=payload.get("messages") or []), limits
     )
-    return decision.model, decision.reason
+
+    if settings.shadow_mode:
+        # THE POINT OF SHADOW MODE: the decision is recorded and then ignored.
+        # The request is served exactly as it would be with no router at all.
+        # If this branch ever started returning decision.model, shadow mode
+        # would silently become live routing on someone's production traffic.
+        served = str(requested) if explicit else settings.default_model
+        return served, f"shadow: would have used {decision.model}", decision
+
+    if explicit:
+        return str(requested), None, decision
+
+    return decision.model, decision.reason, None
 
 
 def _usage_from_body(body: bytes) -> tuple[int, int] | None:
@@ -192,6 +216,31 @@ def _routing_status(request: Request) -> dict[str, Any]:
         "models": router.routable_models,
         "trained": router.metadata.describe(),
     }
+
+
+@app.get("/dashboard")
+async def dashboard(request: Request) -> Response:
+    """Where the money went, as a page a human can read.
+
+    Deliberately not behind an API key. The keys are per developer and meant
+    for machines; asking someone to paste one into a browser to see a spend
+    report is how dashboards end up unused. It shows aggregate spend and model
+    names - never prompt text, never keys. Put it behind your own network
+    controls if that is not acceptable in your environment.
+    """
+    ledger: LedgerService = request.app.state.ledger
+    catalog: ModelCatalog = request.app.state.catalog
+
+    data = DashboardData(
+        usage_rows=ledger.usage(),
+        model_rows=ledger.by_model(),
+        shadow=summarise(ledger.shadow_rows()),
+        cache=request.app.state.cache.as_dict(),
+        routing=_routing_status(request),
+        simulated=catalog.has_simulated_pricing,
+        shadow_mode=settings.shadow_mode,
+    )
+    return Response(content=render(data), media_type="text/html; charset=utf-8")
 
 
 @app.get("/metrics")
@@ -266,6 +315,7 @@ async def health(request: Request) -> dict[str, Any]:
         "available_models": pool.available_models(),
         "default_model": settings.default_model,
         "routing": _routing_status(request),
+        "shadow_mode": settings.shadow_mode,
         "cache": request.app.state.cache.as_dict(),
         "rate_limit": request.app.state.limiter.snapshot(),
         "circuits": request.app.state.pool.breaker.snapshot(),
@@ -352,8 +402,24 @@ async def chat_completions(request: Request) -> Response:
         )
 
     requested_model = str(payload.get("model") or AUTO_MODEL)
-    served_model, routing_reason = _resolve_model(request, payload)
+    served_model, routing_reason, shadow = _resolve_model(request, payload)
     messages = payload.get("messages")
+
+    def shadow_fields(prompt_tokens: int = 0, completion_tokens: int = 0) -> dict:
+        """Price the road not taken, using the tokens we actually observed.
+
+        An estimate, and labelled as one everywhere it surfaces - the shadow
+        model was never called, so its own token count does not exist.
+        """
+        if shadow is None or shadow.model == served_model:
+            return {}
+        catalog: ModelCatalog = request.app.state.catalog
+        return {
+            "shadow_model": shadow.model,
+            "shadow_cost_usd": estimate_cost(
+                catalog, shadow.model, prompt_tokens, completion_tokens
+            ),
+        }
 
     def record(status: str, **kwargs) -> None:
         ledger.record(
@@ -367,6 +433,7 @@ async def chat_completions(request: Request) -> Response:
             status=status,
             messages=messages,
             routing_reason=routing_reason,
+            **shadow_fields(),
             **kwargs,
         )
 
@@ -412,6 +479,7 @@ async def chat_completions(request: Request) -> Response:
                 status=STATUS_CACHED,
                 messages=messages,
                 routing_reason=routing_reason,
+                **shadow_fields(hit.prompt_tokens, hit.completion_tokens),
             )
             return Response(
                 content=hit.body,
@@ -435,6 +503,7 @@ async def chat_completions(request: Request) -> Response:
             messages=messages,
             started=started,
             routing_reason=routing_reason,
+            shadow_fields=shadow_fields,
         )
 
     upstream, provider, failure = await _call_with_failover(
@@ -469,6 +538,7 @@ async def chat_completions(request: Request) -> Response:
         error_detail=None if upstream.status_code < 400 else upstream.text[:500],
         messages=messages,
         routing_reason=routing_reason,
+        **shadow_fields(prompt_tokens, completion_tokens),
     )
 
     metrics.increment(
@@ -553,6 +623,7 @@ async def _serve_streaming(
     messages: Any,
     started: float,
     routing_reason: str | None = None,
+    shadow_fields=None,
 ) -> Response:
     """Stream the answer through untouched, accounting for it as it passes."""
     stream = provider.stream_chat_completion(payload)
@@ -611,6 +682,11 @@ async def _serve_streaming(
                 status=STATUS_OK,
                 messages=messages,
                 routing_reason=routing_reason,
+                **(
+                    shadow_fields(prompt_tokens, completion_tokens)
+                    if shadow_fields
+                    else {}
+                ),
             )
 
     return StreamingResponse(body(), media_type="text/event-stream")

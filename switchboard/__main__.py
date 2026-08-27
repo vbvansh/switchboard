@@ -1638,5 +1638,66 @@ def _report_router_mapping(trained_models: list[str]) -> None:
         )
 
 
+@cli.command()
+def shadow() -> None:
+    """What would routing have done to the traffic you actually served?
+
+    Reads the requests recorded while shadow mode was on. Every figure here is
+    a PROJECTION: the shadow model was never called, so its cost is estimated
+    from the tokens the real model produced, and nothing here can say whether
+    its answer would have been as good.
+    """
+    from switchboard.shadow import summarise
+
+    ledger = _ledger()
+    summary = summarise(ledger.shadow_rows())
+
+    if not summary.requests:
+        console.print(
+            "[yellow]No shadowed requests recorded this month.[/yellow]\n"
+            "Turn shadow mode on with [cyan]SWITCHBOARD_SHADOW_MODE=true[/cyan], "
+            "send some traffic, then run this again."
+        )
+        return
+
+    table = Table(title="Shadow mode - what routing WOULD have done")
+    table.add_column("Measure")
+    table.add_column("Value", justify="right")
+
+    table.add_row("Requests shadowed", f"{summary.requests:,}")
+    table.add_row("Cost as served", f"${summary.actual_cost_usd:,.4f}")
+    table.add_row("Cost if routed (estimated)", f"${summary.shadow_cost_usd:,.4f}")
+
+    colour = "green" if summary.projected_saving_usd >= 0 else "red"
+    table.add_row(
+        "Projected saving",
+        f"[{colour}]${summary.projected_saving_usd:,.4f} "
+        f"({summary.projected_saving_pct:.1f}%)[/{colour}]",
+    )
+    table.add_row("Different model chosen", f"{summary.changed:,} "
+                  f"({summary.changed_pct:.0f}%)")
+    table.add_row("  ... to something cheaper", f"{summary.downgraded:,}")
+    table.add_row("  ... to something dearer", f"{summary.upgraded:,}")
+    console.print(table)
+
+    if summary.model_counts:
+        picks = Table(title="Models routing would have chosen")
+        picks.add_column("Model")
+        picks.add_column("Times", justify="right")
+        for model, count in sorted(
+            summary.model_counts.items(), key=lambda kv: -kv[1]
+        ):
+            picks.add_row(str(model), f"{count:,}")
+        console.print(picks)
+
+    console.print(
+        "\n[dim]Projections, not measurements. The shadow model was never "
+        "called: its cost is estimated from the tokens the real model produced, "
+        "so a chattier model would truly have cost more. And no answer was "
+        "produced to grade, so nothing here says whether quality would have "
+        "held up.[/dim]"
+    )
+
+
 if __name__ == "__main__":
     cli()

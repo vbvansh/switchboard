@@ -105,6 +105,15 @@ class RequestLog(Base):
     # the fact - and shadow mode in Phase E reads it directly.
     routing_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # --- Shadow mode -------------------------------------------------------
+    # What the router WOULD have chosen, when it was not allowed to choose.
+    # Null on every request made with shadow mode off - which is why reports
+    # skip those rows rather than counting them as "routing agreed".
+    shadow_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Estimated, not measured: the shadow model was never called, so this
+    # prices the REAL request's tokens at the shadow model's rates.
+    shadow_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # --- Outcome -----------------------------------------------------------
     # ok | blocked_budget | provider_error | client_error
     status: Mapped[str] = mapped_column(String(32), default="ok", index=True)

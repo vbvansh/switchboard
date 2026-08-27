@@ -30,6 +30,8 @@ subject to per-request latency, cost and quality limits. What works today:
 - Learned routing in the live API, with an auditable reason per request
 - Response caching, retries, provider failover with a circuit breaker
 - Per-user rate limiting and a Prometheus `/metrics` endpoint
+- Shadow mode: measure routing on your own traffic before trusting it
+- A dependency-free `/dashboard` page
 
 | Phase | | |
 |---|---|---|
@@ -37,7 +39,7 @@ subject to per-request latency, cost and quality limits. What works today:
 | B | Real benchmark data | done |
 | C | The routing brain | done — routing is live |
 | D | Caching, retries, failover, rate limits, metrics | done |
-| E | Shadow mode + dashboard | |
+| E | Shadow mode + dashboard | done |
 | F | Guardrails, docs, write-up | |
 
 ## Why this exists
@@ -537,6 +539,64 @@ time and, on a paid provider, money. A `Retry-After` header from the provider
 wins over our own backoff, clamped so a very long one cannot hold a request
 open indefinitely. Jitter matters: without it every client that failed during
 an outage retries in the same instant and knocks the provider over again.
+
+## Shadow mode
+
+Nobody sensible points a new routing system at production traffic and hopes.
+
+Shadow mode runs the router on every request, records the model it would have
+chosen and what that would have cost, and then **ignores the decision** and
+serves the request exactly as it would have been served anyway.
+
+```powershell
+$env:SWITCHBOARD_SHADOW_MODE = "true"
+python -m switchboard serve
+# ... a week of real traffic ...
+python -m switchboard shadow
+```
+
+After a week you have a report on your own workload:
+
+```
+Requests shadowed              1,284
+Cost as served                 $41.20
+Cost if routed (estimated)     $14.07
+Projected saving               $27.13 (65.8%)
+Different model chosen         912 (71%)
+  ... to something cheaper     889
+  ... to something dearer       23
+```
+
+That is a decision an engineering manager can act on, having risked nothing.
+
+It also fixes the limitation found in Phase C.4. A router trained on public
+benchmarks does not understand short chat prompts; the fix is training on the
+traffic you actually serve, and shadow mode is what collects it with the
+router's opinion attached.
+
+### Two honest limits
+
+**The shadow cost is an estimate.** The shadow model was never called, so its
+token count does not exist. The estimate reuses the tokens the real model
+produced and prices them at the shadow model's rates. A chattier model would
+truly have cost more. This is labelled as a projection everywhere it appears.
+
+**It cannot tell you whether quality would have held up.** No answer was
+produced to grade. What it can report is the router's own predicted probability
+of success — a forecast, not evidence.
+
+## Dashboard
+
+`GET /dashboard` renders spend, savings, per-model traffic, cache hit rate and
+the shadow projection as a single page.
+
+Server-rendered HTML with inline styles. No JavaScript, no build step, no
+external fonts or scripts — it works on a machine with no internet access,
+which is exactly what `SWITCHBOARD_LOCAL_ONLY` exists to support, and nothing
+loaded from a CDN can observe when your engineers check their AI spend.
+
+The numbers come from the same ledger the CLI reads, so the page and
+`switchboard usage` can never disagree.
 
 ## Reliability: failover, rate limits, metrics
 

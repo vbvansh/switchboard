@@ -211,6 +211,8 @@ class LedgerService:
         error_detail: str | None = None,
         messages: list | None = None,
         routing_reason: str | None = None,
+        shadow_model: str | None = None,
+        shadow_cost_usd: float | None = None,
     ) -> RequestLog:
         # A cache hit bought nothing, so it costs nothing. The BASELINE is
         # still what those tokens would have cost on the top-tier model, which
@@ -243,6 +245,8 @@ class LedgerService:
             status=status,
             error_detail=error_detail,
             routing_reason=routing_reason,
+            shadow_model=shadow_model,
+            shadow_cost_usd=shadow_cost_usd,
             prompt_json=(
                 json.dumps(messages, ensure_ascii=False)
                 if self._store_prompts and messages is not None
@@ -253,7 +257,43 @@ class LedgerService:
             session.add(entry)
         return entry
 
+
+    def shadow_rows(self, now: datetime | None = None) -> list:
+        """Requests this month that carry a routing opinion.
+
+        Rows without one are excluded at the query, not filtered later: a
+        request served before shadow mode was switched on has no opinion, and
+        counting it as "routing agreed" would dilute every projection.
+        """
+        now = now or utcnow()
+        with self._db.session() as session:
+            return list(
+                session.scalars(
+                    select(RequestLog)
+                    .where(RequestLog.created_at >= month_start(now))
+                    .where(RequestLog.shadow_model.is_not(None))
+                )
+            )
+
+    def by_model(self, now: datetime | None = None) -> list[tuple[str, int, float]]:
+        """(model, requests, cost) this month, busiest first."""
+        now = now or utcnow()
+        with self._db.session() as session:
+            rows = session.execute(
+                select(
+                    RequestLog.served_model,
+                    func.count(RequestLog.id),
+                    func.coalesce(func.sum(RequestLog.simulated_cost_usd), 0.0),
+                )
+                .where(RequestLog.created_at >= month_start(now))
+                .where(RequestLog.status.in_(SERVED_STATUSES))
+                .group_by(RequestLog.served_model)
+                .order_by(func.count(RequestLog.id).desc())
+            ).all()
+        return [(str(m), int(c), float(cost)) for m, c, cost in rows]
+
     # --- Reporting ---------------------------------------------------------
+
 
     def usage(self, now: datetime | None = None) -> list[UsageRow]:
         """Month-to-date usage per user, for the `usage` CLI command."""

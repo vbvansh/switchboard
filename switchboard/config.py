@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     retry_attempts: int = 3
     retry_base_delay_s: float = 0.5
 
+    # Watch what routing WOULD do, without letting it do it. Requests are
+    # served exactly as they would be with no router, and the router's opinion
+    # is recorded alongside. This is how a team trials routing on their own
+    # traffic before trusting it. See switchboard/shadow.py.
+    shadow_mode: bool = False
+
     # --- Rate limiting ------------------------------------------------------
     # Requests per minute per user. A monthly budget does not stop someone
     # spending it in ninety seconds; this does. Set to 0 to disable.
