@@ -22,6 +22,14 @@ STATUS_OK = "ok"
 STATUS_BLOCKED_BUDGET = "blocked_budget"
 STATUS_PROVIDER_ERROR = "provider_error"
 STATUS_CLIENT_ERROR = "client_error"
+# Served from the response cache. Recorded so hits are visible in usage
+# reports, and priced at zero because nothing was actually bought.
+STATUS_CACHED = "cached"
+
+#: Statuses that represent a request the user actually made and got an
+#: answer for. A cache hit belongs here: it happened, it counts, and it
+#: cost nothing - which is precisely the saving the cache produced.
+SERVED_STATUSES = (STATUS_OK, STATUS_CACHED)
 
 # Rough characters-per-token, used only when the provider fails to report
 # usage. Deliberately crude - rows relying on it are flagged
@@ -169,7 +177,7 @@ class LedgerService:
                 select(func.coalesce(func.sum(RequestLog.simulated_cost_usd), 0.0))
                 .where(RequestLog.user_id == user_id)
                 .where(RequestLog.created_at >= month_start(now))
-                .where(RequestLog.status == STATUS_OK)
+                .where(RequestLog.status.in_(SERVED_STATUSES))
             )
         return float(total or 0.0)
 
@@ -204,7 +212,14 @@ class LedgerService:
         messages: list | None = None,
         routing_reason: str | None = None,
     ) -> RequestLog:
-        cost = self._prices.cost(served_model, prompt_tokens, completion_tokens)
+        # A cache hit bought nothing, so it costs nothing. The BASELINE is
+        # still what those tokens would have cost on the top-tier model, which
+        # is exactly the saving the cache produced.
+        cost = (
+            0.0
+            if status == STATUS_CACHED
+            else self._prices.cost(served_model, prompt_tokens, completion_tokens)
+        )
         baseline = self._prices.baseline_cost(prompt_tokens, completion_tokens)
 
         switched = (
@@ -259,7 +274,7 @@ class LedgerService:
                     RequestLog,
                     (RequestLog.user_id == User.id)
                     & (RequestLog.created_at >= start)
-                    & (RequestLog.status == STATUS_OK),
+                    & (RequestLog.status.in_(SERVED_STATUSES)),
                 )
                 .group_by(User.id)
                 .order_by(User.name)

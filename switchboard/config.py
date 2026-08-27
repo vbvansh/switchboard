@@ -42,6 +42,18 @@ class Settings(BaseSettings):
     # per request with the X-Switchboard-Min-Quality header.
     router_min_quality: float = 0.5
 
+    # --- Response cache -----------------------------------------------------
+    # Identical requests are answered from memory for nothing. Set entries to 0
+    # to switch it off. Only deterministic, non-streaming requests qualify.
+    cache_max_entries: int = 1000
+    cache_ttl_s: float = 3600.0
+
+    # --- Retries ------------------------------------------------------------
+    # Applies only to transient failures - timeouts, 429, 5xx. A malformed
+    # request is never retried; it would fail identically and cost twice.
+    retry_attempts: int = 3
+    retry_base_delay_s: float = 0.5
+
     # Refuse to start if any enabled provider is not on this machine.
     #
     # Off by default, because talking to providers is the point of the product.

@@ -17,6 +17,7 @@ from switchboard.providers.base import (
     ProviderUnavailable,
 )
 from switchboard.providers.openai_compatible import OpenAICompatibleProvider
+from switchboard.providers.retry import RetryPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +32,14 @@ class LocalOnlyViolation(RuntimeError):
 
 
 class ProviderPool:
-    def __init__(self, catalog: ModelCatalog, local_only: bool = False) -> None:
+    def __init__(
+        self,
+        catalog: ModelCatalog,
+        local_only: bool = False,
+        retry: RetryPolicy | None = None,
+    ) -> None:
         self._catalog = catalog
+        self._retry = retry or RetryPolicy()
         self._providers: dict[str, Provider] = {}
         self._unconfigured: dict[str, str] = {}
 
@@ -59,7 +66,7 @@ class ProviderPool:
             return
 
         try:
-            self._providers[spec.id] = adapter(spec)  # type: ignore[call-arg]
+            self._providers[spec.id] = adapter(spec, self._retry)  # type: ignore[call-arg]
         except ProviderNotConfigured as exc:
             # A missing key disables one provider; it must not stop the server.
             # Recorded so `switchboard providers` can explain the gap.

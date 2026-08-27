@@ -26,12 +26,16 @@ from switchboard.providers.base import (
     ProviderNotConfigured,
     ProviderUnavailable,
 )
+from switchboard.providers.retry import RetryPolicy, with_retries
 
 
 class OpenAICompatibleProvider(Provider):
-    def __init__(self, spec: ProviderSpec) -> None:
+    def __init__(
+        self, spec: ProviderSpec, retry: RetryPolicy | None = None
+    ) -> None:
         self.id = spec.id
         self.spec = spec
+        self.retry = retry or RetryPolicy()
 
         if spec.requires_key and not spec.key_is_available:
             raise ProviderNotConfigured(
@@ -57,8 +61,11 @@ class OpenAICompatibleProvider(Provider):
         await self._client.aclose()
 
     async def chat_completion(self, payload: dict[str, Any]) -> httpx.Response:
-        try:
+        async def send() -> httpx.Response:
             return await self._client.post("/chat/completions", json=payload)
+
+        try:
+            return await with_retries(send, self.retry, f"{self.id} completion")
         except httpx.ConnectError as exc:
             raise ProviderUnavailable(self._unreachable(exc)) from exc
         except httpx.TimeoutException as exc:

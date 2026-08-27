@@ -28,13 +28,14 @@ subject to per-request latency, cost and quality limits. What works today:
 - Schema migrations — upgrades never destroy your data
 - Offline evaluation against 696k recorded answers from real models
 - Learned routing in the live API, with an auditable reason per request
+- Response caching and automatic retries on transient provider failures
 
 | Phase | | |
 |---|---|---|
 | A | Foundations: licence, privacy, migrations, providers, Docker | done |
 | B | Real benchmark data | done |
 | C | The routing brain | done — routing is live |
-| D | Caching, failover, retries, metrics | |
+| D | Caching + retries done; failover, rate limits, metrics next |  |
 | E | Shadow mode + dashboard | |
 | F | Guardrails, docs, write-up | |
 
@@ -488,6 +489,53 @@ SWITCHBOARD_STORE_PROMPTS=true
 
 If you turn it on: tell your users, protect the database file, and check what
 your local data-protection rules require. The database is excluded from git.
+
+## Caching and retries
+
+### Response cache
+
+Identical requests are answered from memory for nothing. This is the largest
+saving a gateway can offer and the simplest to reason about.
+
+```
+X-Switchboard-Cache: hit    served from memory, cost $0
+X-Switchboard-Cache: miss   went to the provider, and was stored
+X-Switchboard-Cache: skip   not eligible - see below
+```
+
+Four rules, each of them a way this could go wrong:
+
+**Only byte-identical requests hit.** The key covers the model, the messages
+and every sampling option that changes the output. "Similar" questions are not
+matched. Semantic matching would return an answer to a question nobody asked,
+and a cache that is occasionally confidently wrong is worse than no cache.
+
+**Nothing random is cached.** A request at `temperature: 0.8` is asking for
+variety. Returning a stored answer would silently defeat that.
+
+**Hits cost nothing, and the ledger says so.** A hit recorded at full price
+would inflate every savings figure. It is stored with `status: cached`, zero
+cost, and the baseline it would have cost — so cache savings show up in
+`switchboard usage` alongside routing savings.
+
+**Entries expire and the cache is size-bounded** (`SWITCHBOARD_CACHE_TTL_S`,
+`SWITCHBOARD_CACHE_MAX_ENTRIES`; set entries to 0 to disable). Models get
+replaced; an answer from three weeks ago may not be what that model says today.
+
+### Retries
+
+Transient failures are retried with exponential backoff and jitter.
+
+| Retried | Not retried |
+|---|---|
+| 408, 409, 429, 500, 502, 503, 504 | 400, 401, 403, 404, 422 |
+| connection resets, timeouts | programming errors |
+
+A malformed request will be malformed the second time too — retrying it wastes
+time and, on a paid provider, money. A `Retry-After` header from the provider
+wins over our own backoff, clamped so a very long one cannot hold a request
+open indefinitely. Jitter matters: without it every client that failed during
+an outage retries in the same instant and knocks the provider over again.
 
 ## Health endpoints
 

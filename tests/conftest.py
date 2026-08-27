@@ -142,9 +142,14 @@ def client(
     from fastapi.testclient import TestClient
 
     from switchboard import api
+    from switchboard.cache import ResponseCache
 
     api.app.state.pool = pool
     api.app.state.catalog = prices
+    # A fresh cache per test: entries leaking between tests would make results
+    # depend on execution order.
+    api.app.state.cache = ResponseCache()
+    api.app.state.router = None
     api.app.state.database = database
     api.app.state.ledger = ledger
     return TestClient(api.app)

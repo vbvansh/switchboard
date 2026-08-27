@@ -25,10 +25,12 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from switchboard.cache import ResponseCache, cache_key, is_cacheable
 from switchboard.catalog import ModelCatalog
 from switchboard.config import AUTO_MODEL, settings
 from switchboard.ledger import (
     STATUS_BLOCKED_BUDGET,
+    STATUS_CACHED,
     STATUS_OK,
     STATUS_PROVIDER_ERROR,
     AuthenticationError,
@@ -40,6 +42,7 @@ from switchboard.ledger import (
 from switchboard.ledger.keys import extract_bearer_token
 from switchboard.ledger.service import estimate_tokens
 from switchboard.providers import Provider, ProviderPool, ProviderUnavailable
+from switchboard.providers.retry import RetryPolicy
 from switchboard.routing.base import RoutingContext
 from switchboard.routing.live import RequestLimits, build_router
 from switchboard.schema import require_up_to_date
@@ -56,7 +59,11 @@ async def lifespan(app: FastAPI):
     catalog = ModelCatalog.load(settings.providers_file)
     database = Database(settings.database_url)
 
-    pool = ProviderPool(catalog, local_only=settings.local_only)
+    retry = RetryPolicy(
+        attempts=settings.retry_attempts,
+        base_delay_s=settings.retry_base_delay_s,
+    )
+    pool = ProviderPool(catalog, local_only=settings.local_only, retry=retry)
 
     app.state.catalog = catalog
     app.state.pool = pool
@@ -65,6 +72,9 @@ async def lifespan(app: FastAPI):
     # A missing or stale router must never stop the server: requests fall back
     # to the default model and /health says routing is off.
     app.state.router = build_router(catalog, pool.available_models())
+    app.state.cache = ResponseCache(
+        max_entries=settings.cache_max_entries, ttl_s=settings.cache_ttl_s
+    )
     try:
         yield
     finally:
@@ -230,6 +240,7 @@ async def health(request: Request) -> dict[str, Any]:
         "available_models": pool.available_models(),
         "default_model": settings.default_model,
         "routing": _routing_status(request),
+        "cache": request.app.state.cache.as_dict(),
         "local_only": settings.local_only,
         "store_prompts": settings.store_prompts,
         "simulated_pricing": catalog.has_simulated_pricing,
@@ -326,6 +337,35 @@ async def chat_completions(request: Request) -> Response:
     payload["model"] = served_model
     started = time.perf_counter()
 
+    # A cache hit costs nothing and must be RECORDED as costing nothing. A hit
+    # billed at the full price would inflate every savings figure.
+    cache: ResponseCache = request.app.state.cache
+    cacheable, why = is_cacheable(payload)
+    key = cache_key(payload, served_model) if cacheable else None
+
+    if key is not None:
+        if (hit := cache.get(key)) is not None:
+            ledger.record(
+                user_id=user.id,
+                requested_model=requested_model,
+                served_model=served_model,
+                prompt_tokens=hit.prompt_tokens,
+                completion_tokens=hit.completion_tokens,
+                tokens_estimated=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                status=STATUS_CACHED,
+                messages=messages,
+                routing_reason=routing_reason,
+            )
+            return Response(
+                content=hit.body,
+                status_code=hit.status_code,
+                media_type="application/json",
+                headers={"X-Switchboard-Cache": "hit"},
+            )
+    elif not payload.get("stream"):
+        cache.skip(why)
+
     if payload.get("stream"):
         return await _serve_streaming(
             payload=request_usage_in_stream(payload),
@@ -372,10 +412,20 @@ async def chat_completions(request: Request) -> Response:
         routing_reason=routing_reason,
     )
 
+    if key is not None:
+        cache.put(
+            key,
+            upstream.content,
+            upstream.status_code,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,
         media_type="application/json",
+        headers={"X-Switchboard-Cache": "miss" if key is not None else "skip"},
     )
 
 
