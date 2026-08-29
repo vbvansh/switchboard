@@ -213,3 +213,30 @@ def test_runtime_requirements_cover_what_the_server_imports() -> None:
     runtime = (PROJECT_ROOT / "requirements.txt").read_text().lower()
     for needed in ("fastapi", "uvicorn", "httpx", "sqlalchemy", "alembic", "pyyaml"):
         assert needed in runtime, needed
+
+
+def test_the_labelled_samples_ship_inside_the_package() -> None:
+    """`switchboard guardrails calibrate` must work in the container.
+
+    The Dockerfile copies switchboard/ wholesale, so a sample file living
+    anywhere else - data/, which is gitignored, or eval/, which is not in the
+    image - would leave the command broken exactly where an operator would
+    first reach for it.
+    """
+    assert (PROJECT_ROOT / "switchboard" / "guardrail_samples.jsonl").exists()
+
+
+def test_the_example_rules_file_actually_loads() -> None:
+    """A documented example that does not parse is worse than no example.
+
+    The specific trap this guards: patterns must be single-quoted in YAML.
+    Double-quoted, `\b` is a backspace character rather than a regex word
+    boundary, and every rule silently stops matching.
+    """
+    from switchboard.guardrails import Guardrails, load_rules
+
+    rules = load_rules(PROJECT_ROOT / "guardrails.example.yaml")
+    assert len(rules) >= 5
+    assert Guardrails(mode="flag", rules=rules).score(
+        "Plan my holiday to Bali"
+    ).flagged

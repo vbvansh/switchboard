@@ -114,8 +114,20 @@ class RequestLog(Base):
     # prices the REAL request's tokens at the shadow model's rates.
     shadow_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # --- Usage policy ------------------------------------------------------
+    # What the guardrails made of this request. NULL means the policy was off,
+    # which is deliberately different from "allowed": a report must be able to
+    # tell "examined and fine" from "never examined".
+    #
+    # Never the prompt text - only the category and the names of the rules that
+    # matched, which is enough to explain a flag or argue with it.
+    guardrail_label: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # allowed | flagged | blocked | overridden
+    guardrail_action: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    guardrail_rules: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # --- Outcome -----------------------------------------------------------
-    # ok | blocked_budget | provider_error | client_error
+    # ok | blocked_budget | blocked_policy | provider_error | client_error
     status: Mapped[str] = mapped_column(String(32), default="ok", index=True)
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 

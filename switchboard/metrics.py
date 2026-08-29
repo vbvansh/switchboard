@@ -154,6 +154,7 @@ CACHE_EVENTS = "switchboard_cache_events_total"
 PROVIDER_ATTEMPTS = "switchboard_provider_attempts_total"
 FAILOVERS = "switchboard_failovers_total"
 RATE_LIMITED = "switchboard_rate_limited_total"
+POLICY_EVENTS = "switchboard_policy_events_total"
 TOKENS = "switchboard_tokens_total"
 COST = "switchboard_simulated_cost_usd_total"
 
@@ -166,6 +167,11 @@ def build_registry() -> Metrics:
     metrics.describe(PROVIDER_ATTEMPTS, "Calls to a provider, by outcome.")
     metrics.describe(FAILOVERS, "Times a request moved to a backup provider.")
     metrics.describe(RATE_LIMITED, "Requests refused for exceeding a rate limit.")
+    metrics.describe(
+        POLICY_EVENTS,
+        "Usage policy verdicts, by category and action. Labels are drawn "
+        "from the fixed rule set, never from caller text.",
+    )
     metrics.describe(TOKENS, "Tokens processed, by direction.")
     metrics.describe(COST, "Simulated spend. NOT real money - see the README.")
     return metrics

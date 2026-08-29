@@ -60,6 +60,24 @@ class Settings(BaseSettings):
     # traffic before trusting it. See switchboard/shadow.py.
     shadow_mode: bool = False
 
+    # --- Usage policy (guardrails) -----------------------------------------
+    # "off", "flag" or "block". See switchboard/guardrails.py for why the
+    # default is flag and not block:
+    #
+    #   missing a personal request costs a fraction of a cent;
+    #   wrongly blocking a real one stops an engineer working.
+    #
+    # In flag mode nothing is refused. A label and the names of the rules that
+    # matched are written to the ledger - never the prompt text, which stays
+    # behind store_prompts as before.
+    guardrails_mode: str = "flag"
+
+    # Optional YAML rule file. It REPLACES the built-in rules rather than
+    # adding to them, so a shipped rule that keeps flagging your team's real
+    # work can actually be removed. A file that fails to load stops startup:
+    # a policy an operator thinks is running must never be silently off.
+    guardrails_file: str | None = None
+
     # --- Rate limiting ------------------------------------------------------
     # Requests per minute per user. A monthly budget does not stop someone
     # spending it in ninety seconds; this does. Set to 0 to disable.

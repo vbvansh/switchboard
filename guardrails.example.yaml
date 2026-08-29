@@ -1,0 +1,87 @@
+# Usage policy rules.
+#
+#   copy to guardrails.yaml, edit, then set:
+#   SWITCHBOARD_GUARDRAILS_FILE=guardrails.yaml
+#
+# This file REPLACES the built-in rules rather than adding to them. That is
+# deliberate: a merge would make it impossible to remove a shipped rule that
+# keeps catching your team's real work. Start from this file, delete what does
+# not apply to you, and add what does.
+#
+# TWO THINGS THAT WILL BITE YOU
+#
+# 1. Use SINGLE quotes around patterns. In double-quoted YAML, `\b` means
+#    backspace, not a regex word boundary, and your pattern will silently never
+#    match anything.
+#
+# 2. Write PHRASES, not words. "trip" appears in "round trip latency"; "plan my
+#    holiday" does not appear in anything else. Before adding a weight-1.0 rule,
+#    ask one question: could somebody on my team write this sentence about their
+#    job? If they could, it belongs at 0.5.
+#
+# WEIGHTS
+#   1.0  this phrase alone is enough to flag
+#   0.5  suspicious, but it does turn up in real work - needs a second signal
+#
+# Technical content in the prompt (code fences, stack traces, SQL, file paths)
+# subtracts up to 1.0 from the score. That is not configurable, and it is why a
+# prompt full of code needs a much stronger personal signal to trip.
+#
+# Check your work before deploying it:
+#   python -m switchboard guardrails check "some prompt"
+#   python -m switchboard guardrails calibrate --samples my_prompts.jsonl
+
+rules:
+  # --- Travel ---------------------------------------------------------------
+  - name: holiday_planning
+    label: personal
+    weight: 1.0
+    pattern: '\b(plan|planning|book|booking)\b[^.?!]{0,30}\b(my|our|a)\b[^.?!]{0,20}\b(holiday|vacation|honeymoon|getaway|road ?trip)\b'
+
+  - name: travel_booking
+    label: personal
+    weight: 1.0
+    pattern: '\b(book|find|cheapest)\b[^.?!]{0,25}\b(flight|flights|hotel|airbnb|hostel|train ticket)\b'
+
+  # --- Relationships --------------------------------------------------------
+  - name: relationships
+    label: personal
+    weight: 1.0
+    pattern: '\bmy (girlfriend|boyfriend|wife|husband|ex|crush)\b|\b(marriage|divorce|breakup) advice\b'
+
+  # --- Life admin -----------------------------------------------------------
+  - name: personal_finance
+    label: personal
+    weight: 1.0
+    pattern: '\bshould i (buy|invest in|sell)\b[^.?!]{0,25}\b(stock|stocks|shares|crypto|bitcoin|property|house|car)\b'
+
+  - name: horoscope
+    label: personal
+    weight: 1.0
+    pattern: '\b(horoscope|astrology|zodiac|tarot|numerology|birth chart)\b'
+
+  # --- Homework -------------------------------------------------------------
+  - name: academic_ghostwriting
+    label: personal
+    weight: 1.0
+    pattern: '\bwrite my (essay|assignment|homework|thesis|dissertation)\b'
+
+  # --- Half weight: real signals that also occur in real work ---------------
+  - name: family
+    label: personal
+    weight: 0.5
+    pattern: '\bmy (mum|mom|dad|parents|sister|brother|son|daughter|kids)\b'
+
+  - name: occasion
+    label: personal
+    weight: 0.5
+    pattern: '\bfor (my|our) (birthday|anniversary|wedding|graduation)\b'
+
+  # --- An example of your own -----------------------------------------------
+  # Categories other than "personal" work too, and show up separately in
+  # `switchboard guardrails report`.
+  #
+  # - name: side_project
+  #   label: side_project
+  #   weight: 0.5
+  #   pattern: '\bfor my (startup|side project|freelance client)\b'

@@ -18,7 +18,7 @@ The numbers come from the same ledger the CLI reads, so the page and
 from __future__ import annotations
 
 import html
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from switchboard.shadow import ShadowSummary
 
@@ -101,6 +101,11 @@ class DashboardData:
     routing: dict
     simulated: bool
     shadow_mode: bool
+    #: (label, action, requests, cost) rows from the usage policy.
+    policy_rows: list = field(default_factory=list)
+    #: Which rules are doing the flagging: (rule name, times).
+    policy_rules: list = field(default_factory=list)
+    policy: dict = field(default_factory=dict)
 
 
 def _e(value) -> str:
@@ -206,6 +211,55 @@ def render(data: DashboardData) -> str:
             "would do to your traffic, without letting it change anything.</p>"
         )
 
+
+    # --- Usage policy -------------------------------------------------------
+    mode = data.policy.get("mode", "off")
+    if mode == "off":
+        policy_html = (
+            '<p class="sub">The usage policy is off. Turn it on with '
+            "<code>SWITCHBOARD_GUARDRAILS_MODE=flag</code> to label requests "
+            "that look personal rather than work &mdash; without refusing "
+            "anything.</p>"
+        )
+    else:
+        examined = sum(count for _, _, count, _ in data.policy_rows)
+        flagged = sum(
+            count
+            for label, _, count, _ in data.policy_rows
+            if label and label != "clean"
+        )
+        flagged_cost = sum(
+            cost
+            for label, _, _, cost in data.policy_rows
+            if label and label != "clean"
+        )
+        share = (100.0 * flagged / examined) if examined else 0.0
+        rule_rows = "".join(
+            f"<tr><td>{_e(name)}</td><td class=\"num\">{count:,}</td></tr>"
+            for name, count in data.policy_rules[:10]
+        ) or '<tr><td colspan="2">Nothing flagged.</td></tr>'
+        policy_html = f"""
+        <div class="tiles">
+          {_tile("Requests examined", f"{examined:,}")}
+          {_tile("Flagged as personal", f"{flagged:,}", f"{share:.1f}% of traffic")}
+          {_tile("Spend on flagged", f"${flagged_cost:,.4f}")}
+          {_tile("Mode", _e(mode),
+                 "blocking" if mode == "block" else "labels only, nothing refused")}
+        </div>
+        <table>
+          <thead><tr><th>Rule that matched</th>
+          <th class="num">Times</th></tr></thead>
+          <tbody>{rule_rows}</tbody>
+        </table>
+        <div class="banner">
+          <strong>This is a keyword match, and it is wrong sometimes.</strong>
+          Treat these counts as a prompt to go and look, never as a finding
+          about a person. If a rule above keeps catching your team&rsquo;s real
+          work, delete it: point
+          <code>SWITCHBOARD_GUARDRAILS_FILE</code> at your own rule file, which
+          replaces the built-in set rather than adding to it.
+        </div>"""
+
     routing_note = (
         f"routing over {', '.join(_e(m) for m in data.routing.get('models', []))}"
         if data.routing.get("enabled")
@@ -240,6 +294,9 @@ def render(data: DashboardData) -> str:
 
   <h2>Shadow mode</h2>
   {shadow_html}
+
+  <h2>Usage policy</h2>
+  {policy_html}
 
   <footer>
     Served from the same ledger as <code>switchboard usage</code>, so this page

@@ -3,6 +3,7 @@ from switchboard.ledger.models import Base, RequestLog, User, utcnow
 from switchboard.ledger.service import (
     SERVED_STATUSES,
     STATUS_BLOCKED_BUDGET,
+    STATUS_BLOCKED_POLICY,
     STATUS_CACHED,
     STATUS_CLIENT_ERROR,
     STATUS_OK,
@@ -17,6 +18,7 @@ from switchboard.ledger.service import (
 
 __all__ = [
     "STATUS_BLOCKED_BUDGET",
+    "STATUS_BLOCKED_POLICY",
     "STATUS_CACHED",
     "STATUS_CLIENT_ERROR",
     "STATUS_OK",

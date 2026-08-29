@@ -1,0 +1,87 @@
+# Labelled prompts for `switchboard guardrails calibrate`.
+#
+# HONESTY NOTE, and please read it before quoting any number this file
+# produces. These 70 prompts were written by hand by the author of this
+# project. They are NOT a random sample of anybody's real traffic, and a
+# detector measured on prompts written by the person who wrote its rules will
+# always look better than it is. Treat the resulting numbers as a smoke test -
+# "does this catch obvious cases without tripping over obvious work?" - and
+# not as evidence of how it will behave on your team.
+#
+# The right calibration set is your own. Turn shadow-style flagging on, run it
+# for a week, export the flagged requests, and label them yourself.
+#
+# One JSON object per line. Lines starting with # are ignored.
+#
+# --- Work ------------------------------------------------------------------
+{"text": "Why is this Python function returning None instead of a list?", "label": "work"}
+{"text": "Write a unit test for the retry logic in providers/retry.py", "label": "work"}
+{"text": "This query takes 40 seconds: SELECT * FROM orders JOIN users ON orders.user_id = users.id. How do I speed it up?", "label": "work"}
+{"text": "Explain this traceback: KeyError: 'model' raised in api.py at line 120", "label": "work"}
+{"text": "Refactor this React component to use hooks instead of a class", "label": "work"}
+{"text": "What is the difference between a Kubernetes Deployment and a StatefulSet?", "label": "work"}
+{"text": "Draft a design doc for the new billing service", "label": "work"}
+{"text": "My docker build fails at the pip install step with exit code 137", "label": "work"}
+{"text": "Write a regex that matches semantic version strings like 1.2.3-rc1", "label": "work"}
+{"text": "How do I roll back an Alembic migration that has already been applied?", "label": "work"}
+{"text": "Summarise this incident report into a postmortem timeline", "label": "work"}
+{"text": "Convert this bash script to PowerShell", "label": "work"}
+{"text": "Review my pull request description and make it clearer", "label": "work"}
+{"text": "What is causing the p95 latency spike on our search API endpoint?", "label": "work"}
+{"text": "Generate a terraform module for an S3 bucket with versioning enabled", "label": "work"}
+{"text": "Explain the CAP theorem to a junior engineer joining next week", "label": "work"}
+{"text": "Write release notes for version 2.3.0 from this changelog", "label": "work"}
+{"text": "Our CI pipeline is flaky. Tests pass locally but fail on GitHub Actions", "label": "work"}
+{"text": "Help me plan the sprint for next week from this backlog", "label": "work"}
+{"text": "Plan a migration from MySQL to Postgres for our reporting database", "label": "work"}
+{"text": "I need to book a meeting room through the Google Calendar API. Show me the request body", "label": "work"}
+{"text": "Write an email to the client explaining why the release slipped", "label": "work"}
+{"text": "Which laptop should I buy for the new backend developers, is 16GB of RAM enough?", "label": "work"}
+{"text": "Debug this segfault in our C extension when the array is empty", "label": "work"}
+{"text": "Write a SQL migration to add an index on created_at", "label": "work"}
+{"text": "How do I mock httpx in pytest without hitting the network?", "label": "work"}
+{"text": "Explain what this YAML in .github/workflows/ci.yml actually does", "label": "work"}
+{"text": "Summarise the customer feedback from last quarter into three themes", "label": "work"}
+{"text": "Write a Python script to parse these logs and count errors by hour", "label": "work"}
+{"text": "Our nginx config returns 502 on websocket upgrade requests", "label": "work"}
+{"text": "Compare Redis and Memcached for storing session data", "label": "work"}
+{"text": "Write a job description for a senior backend engineer", "label": "work"}
+{"text": "Turn these bullet points into a status update for my manager", "label": "work"}
+{"text": "How do I resolve this merge conflict in package-lock.json?", "label": "work"}
+{"text": "What is the practical throughput limit of a single Kafka partition?", "label": "work"}
+{"text": "Estimate the monthly cost of running this workload on AWS", "label": "work"}
+{"text": "Write onboarding docs for the payments service", "label": "work"}
+{"text": "Translate this error message into Spanish for our i18n file", "label": "work"}
+{"text": "Is there a race condition in this Go code that uses a shared map?", "label": "work"}
+{"text": "Draft an agenda for the architecture review meeting", "label": "work"}
+{"text": "Explain the OAuth 2.0 device authorization flow", "label": "work"}
+{"text": "Our nightly ETL job failed with an exception in the transform step", "label": "work"}
+{"text": "Write a poem for the team's release announcement, keep it short", "label": "work"}
+{"text": "Set up a cron job to rotate application logs weekly", "label": "work"}
+{"text": "What does this stack trace from Sentry mean?", "label": "work"}
+# --- Personal ---------------------------------------------------------------
+{"text": "Plan my holiday to Bali for two weeks in December", "label": "personal"}
+{"text": "Book me the cheapest flight from Delhi to Goa next Friday", "label": "personal"}
+{"text": "Write a 5-day itinerary for my trip to Japan", "label": "personal"}
+{"text": "My girlfriend is upset with me, what should I say to her?", "label": "personal"}
+{"text": "Write a love letter for our anniversary", "label": "personal"}
+{"text": "What should I cook for dinner tonight with paneer and rice?", "label": "personal"}
+{"text": "Give me a workout plan for me to lose 5 kg before summer", "label": "personal"}
+{"text": "Should I invest in bitcoin right now or wait?", "label": "personal"}
+{"text": "What does my horoscope say for Leo this month?", "label": "personal"}
+{"text": "Write my essay on the French Revolution, it is due tomorrow", "label": "personal"}
+{"text": "What should I watch on Netflix tonight?", "label": "personal"}
+{"text": "Recipe for chicken biryani for four people", "label": "personal"}
+{"text": "Help me pick a birthday gift for my mum", "label": "personal"}
+{"text": "Write a wedding speech for my brother", "label": "personal"}
+{"text": "I think I have a fever and a headache, should I see a doctor?", "label": "personal"}
+{"text": "Which phone should I buy under 30000 rupees?", "label": "personal"}
+{"text": "My wife wants to redecorate the living room, give me some ideas", "label": "personal"}
+{"text": "Plan a road trip along the coast for our anniversary", "label": "personal"}
+{"text": "Find a hotel in Manali under 3000 a night", "label": "personal"}
+{"text": "Tell me a joke about cats", "label": "personal"}
+{"text": "Draft a birthday message for my dad turning sixty", "label": "personal"}
+{"text": "Should I buy a house in Pune this year or keep renting?", "label": "personal"}
+{"text": "What is my zodiac compatibility with a Scorpio?", "label": "personal"}
+{"text": "Book a hotel near the airport for my parents", "label": "personal"}
+{"text": "My son has a school project on volcanoes, help him write it", "label": "personal"}

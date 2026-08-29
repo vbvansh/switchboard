@@ -2,13 +2,12 @@
 
 Request lifecycle:
 
-    identify (401) -> budget check (402) -> pick model -> find its provider
-    -> serve -> measure -> record -> reply
+    identify (401) -> rate limit (429) -> pick model -> score against the usage
+    policy -> budget check (402) -> policy block (403) -> cache -> find a
+    provider -> serve, failing over -> measure -> record -> reply
 
-Model choice is still fixed: `_resolve_model` is the seam the router plugs into.
-What changed in A.2 is that the chosen model is now looked up in the catalog to
-find which provider serves it, instead of everything going to one hardcoded
-Ollama client.
+Every refusal happens before a provider is called, so a refused request costs
+nothing. `_resolve_model` is the seam the router plugs into.
 
 The request body is deliberately not schema-validated. Passing it through keeps
 compatibility with OpenAI client features this code does not model; only the
@@ -30,8 +29,15 @@ from switchboard.cache import ResponseCache, cache_key, is_cacheable
 from switchboard.catalog import ModelCatalog
 from switchboard.config import AUTO_MODEL, settings
 from switchboard.dashboard import DashboardData, render
+from switchboard.guardrails import (
+    OVERRIDE_HEADER,
+    Guardrails,
+    build_guardrails,
+    prompt_text,
+)
 from switchboard.ledger import (
     STATUS_BLOCKED_BUDGET,
+    STATUS_BLOCKED_POLICY,
     STATUS_CACHED,
     STATUS_OK,
     STATUS_PROVIDER_ERROR,
@@ -87,6 +93,13 @@ async def lifespan(app: FastAPI):
         max_entries=settings.cache_max_entries, ttl_s=settings.cache_ttl_s
     )
     app.state.limiter = RateLimiter(settings.rate_limit_per_minute)
+    # Unlike the router, a broken policy file is fatal here. Routing that
+    # fails to load costs you routing and says so in /health; a policy that
+    # failed to load quietly would be a policy an operator believes is
+    # running while it is switched off.
+    app.state.guardrails = build_guardrails(
+        settings.guardrails_mode, settings.guardrails_file
+    )
     app.state.metrics = metrics_mod.build_registry()
     try:
         yield
@@ -239,6 +252,9 @@ async def dashboard(request: Request) -> Response:
         routing=_routing_status(request),
         simulated=catalog.has_simulated_pricing,
         shadow_mode=settings.shadow_mode,
+        policy_rows=ledger.guardrail_counts(),
+        policy_rules=ledger.flagged_rules(),
+        policy=request.app.state.guardrails.describe(),
     )
     return Response(content=render(data), media_type="text/html; charset=utf-8")
 
@@ -316,6 +332,7 @@ async def health(request: Request) -> dict[str, Any]:
         "default_model": settings.default_model,
         "routing": _routing_status(request),
         "shadow_mode": settings.shadow_mode,
+        "guardrails": request.app.state.guardrails.describe(),
         "cache": request.app.state.cache.as_dict(),
         "rate_limit": request.app.state.limiter.snapshot(),
         "circuits": request.app.state.pool.breaker.snapshot(),
@@ -405,6 +422,32 @@ async def chat_completions(request: Request) -> Response:
     served_model, routing_reason, shadow = _resolve_model(request, payload)
     messages = payload.get("messages")
 
+    # The usage policy reads the prompt in memory and keeps only its verdict.
+    # Nothing here writes prompt text anywhere: that stays behind
+    # settings.store_prompts, off by default, exactly as before.
+    guardrails: Guardrails = request.app.state.guardrails
+    verdict = guardrails.evaluate(
+        prompt_text(messages), request.headers.get(OVERRIDE_HEADER)
+    )
+    policy_fields: dict[str, Any] = (
+        {
+            "guardrail_label": verdict.label,
+            "guardrail_action": verdict.action,
+            "guardrail_rules": ",".join(verdict.matched) or None,
+        }
+        if guardrails.enabled
+        # Left NULL when the policy is off, so a report can tell "examined and
+        # fine" apart from "never examined". Writing "allowed" here would let
+        # someone report a clean month that nothing ever looked at.
+        else {}
+    )
+    if guardrails.enabled:
+        metrics.increment(
+            metrics_mod.POLICY_EVENTS,
+            action=verdict.action,
+            category=verdict.label or "clean",
+        )
+
     def shadow_fields(prompt_tokens: int = 0, completion_tokens: int = 0) -> dict:
         """Price the road not taken, using the tokens we actually observed.
 
@@ -434,6 +477,7 @@ async def chat_completions(request: Request) -> Response:
             messages=messages,
             routing_reason=routing_reason,
             **shadow_fields(),
+            **policy_fields,
             **kwargs,
         )
 
@@ -444,6 +488,16 @@ async def chat_completions(request: Request) -> Response:
         # from spend totals, so retrying cannot dig a deeper hole.
         record(STATUS_BLOCKED_BUDGET, error_detail=str(exc))
         return _error(402, str(exc), "insufficient_quota")
+
+    if verdict.blocked:
+        # Only reachable in `block` mode. 403, not 402: this is a policy
+        # decision, not a money one, and a client that retries on 402 must not
+        # retry this. The message names the rules that matched and says how to
+        # override, because the check is a keyword match and it is sometimes
+        # simply wrong about somebody's work.
+        record(STATUS_BLOCKED_POLICY)
+        metrics.increment(metrics_mod.REQUESTS, status="blocked_policy")
+        return _error(403, guardrails.refusal(verdict), "policy_violation")
 
     candidates = pool.providers_for(served_model)
     if not candidates:
@@ -480,6 +534,7 @@ async def chat_completions(request: Request) -> Response:
                 messages=messages,
                 routing_reason=routing_reason,
                 **shadow_fields(hit.prompt_tokens, hit.completion_tokens),
+                **policy_fields,
             )
             return Response(
                 content=hit.body,
@@ -504,6 +559,7 @@ async def chat_completions(request: Request) -> Response:
             started=started,
             routing_reason=routing_reason,
             shadow_fields=shadow_fields,
+            policy_fields=policy_fields,
         )
 
     upstream, provider, failure = await _call_with_failover(
@@ -539,6 +595,7 @@ async def chat_completions(request: Request) -> Response:
         messages=messages,
         routing_reason=routing_reason,
         **shadow_fields(prompt_tokens, completion_tokens),
+        **policy_fields,
     )
 
     metrics.increment(
@@ -624,6 +681,7 @@ async def _serve_streaming(
     started: float,
     routing_reason: str | None = None,
     shadow_fields=None,
+    policy_fields: dict[str, Any] | None = None,
 ) -> Response:
     """Stream the answer through untouched, accounting for it as it passes."""
     stream = provider.stream_chat_completion(payload)
@@ -645,6 +703,7 @@ async def _serve_streaming(
             error_detail=str(exc),
             messages=messages,
             routing_reason=routing_reason,
+            **(policy_fields or {}),
         )
         return _error(503, str(exc), "provider_unavailable")
     except StopAsyncIteration:
@@ -687,6 +746,7 @@ async def _serve_streaming(
                     if shadow_fields
                     else {}
                 ),
+                **(policy_fields or {}),
             )
 
     return StreamingResponse(body(), media_type="text/event-stream")

@@ -22,11 +22,13 @@ eval_cli = typer.Typer(help="Measure routing strategies against known answers.")
 db_cli = typer.Typer(help="Database schema management.")
 bench_cli = typer.Typer(help="Public routing benchmarks: real models, real costs.")
 router_cli = typer.Typer(help="Train and inspect the live routing model.")
+policy_cli = typer.Typer(help="Usage policy: what is work, and what is not.")
 cli.add_typer(users_cli, name="users")
 cli.add_typer(eval_cli, name="eval")
 cli.add_typer(db_cli, name="db")
 cli.add_typer(bench_cli, name="bench")
 cli.add_typer(router_cli, name="router")
+cli.add_typer(policy_cli, name="guardrails")
 
 console = Console()
 
@@ -1696,6 +1698,156 @@ def shadow() -> None:
         "so a chattier model would truly have cost more. And no answer was "
         "produced to grade, so nothing here says whether quality would have "
         "held up.[/dim]"
+    )
+
+
+# --- Usage policy ----------------------------------------------------------
+
+SAMPLES_PATH = Path(__file__).resolve().parent / "guardrail_samples.jsonl"
+
+
+def _guardrails():
+    from switchboard.guardrails import build_guardrails
+
+    return build_guardrails(settings.guardrails_mode, settings.guardrails_file)
+
+
+@policy_cli.command("check")
+def guardrails_check(
+    text: str = typer.Argument(..., help="A prompt to score."),
+) -> None:
+    """Score one prompt and show exactly why it did or did not flag.
+
+    Use this before turning `block` mode on. Paste in the kind of thing your
+    team actually sends and see whether the rules survive contact with it.
+    """
+    from switchboard.guardrails import MODE_FLAG, Guardrails
+
+    guard = _guardrails()
+    # Scored in flag mode regardless of the configured mode, so `check` is a
+    # question about the rules rather than about the deployment.
+    verdict = Guardrails(
+        mode=MODE_FLAG, rules=guard.rules, threshold=guard.threshold
+    ).score(text)
+
+    colour = "yellow" if verdict.flagged else "green"
+    label = verdict.label or "not flagged"
+    console.print(f"[{colour}]{label}[/{colour}]  score {verdict.score:.1f} "
+                  f"(threshold {guard.threshold:.1f})")
+    console.print(f"[dim]{verdict.explain()}[/dim]")
+    if verdict.flagged and guard.mode != "block":
+        console.print(
+            f"[dim]Mode is '{guard.mode}': this would be labelled in the "
+            "ledger and served normally.[/dim]"
+        )
+
+
+@policy_cli.command("calibrate")
+def guardrails_calibrate(
+    samples: Path = typer.Option(
+        SAMPLES_PATH, "--samples", help="JSONL file of {text, label} rows."
+    ),
+    show_errors: bool = typer.Option(
+        True, "--show-errors/--no-show-errors", help="Print the ones it got wrong."
+    ),
+) -> None:
+    """Measure the detector against prompts whose answer is known.
+
+    The number to look at is the FALSE-POSITIVE RATE: how often a genuine work
+    prompt gets flagged. That is the rate at which this feature gets in
+    somebody's way while they are trying to do their job.
+    """
+    from switchboard.guardrails import calibrate, load_samples
+
+    try:
+        rows = load_samples(samples)
+    except FileNotFoundError:
+        console.print(f"[red]No sample file at {samples}[/red]")
+        raise typer.Exit(code=1) from None
+
+    result = calibrate(_guardrails(), rows)
+
+    table = Table(title=f"Usage policy on {result.total} labelled prompts")
+    table.add_column("Measure")
+    table.add_column("Value", justify="right")
+    table.add_row(
+        "False-positive rate [bold](the one that matters)[/bold]",
+        f"[yellow]{result.false_positive_rate:.1%}[/yellow]",
+    )
+    table.add_row("Personal prompts caught (recall)", f"{result.recall:.1%}")
+    table.add_row("Flags that were correct (precision)", f"{result.precision:.1%}")
+    table.add_row("Work prompts wrongly flagged", f"{result.false_positive}")
+    table.add_row("Personal prompts missed", f"{result.false_negative}")
+    console.print(table)
+
+    if show_errors and result.false_positive_examples:
+        console.print("\n[red]Work prompts this flagged (false alarms):[/red]")
+        for text in result.false_positive_examples:
+            console.print(f"  [dim]-[/dim] {text}")
+    if show_errors and result.false_negative_examples:
+        console.print("\n[yellow]Personal prompts this missed:[/yellow]")
+        for text in result.false_negative_examples:
+            console.print(f"  [dim]-[/dim] {text}")
+
+    console.print(
+        "\n[dim]Misses are the cheap mistake: a personal request costs a "
+        "fraction of a cent. False alarms are the expensive one - they stop "
+        "someone working. The rules are tuned in that direction on purpose.\n"
+        "These prompts were written by hand by this project's author, so they "
+        "flatter the detector. Calibrate on your own traffic before trusting "
+        "any of these numbers.[/dim]"
+    )
+
+
+@policy_cli.command("report")
+def guardrails_report() -> None:
+    """What the policy has seen this month, from the ledger.
+
+    Aggregate only: categories, rule names and counts. No prompt text is
+    stored by the policy, so none can be shown here.
+    """
+    ledger = _ledger()
+    rows = ledger.guardrail_counts()
+    if not rows:
+        console.print(
+            "[yellow]No requests have been examined this month.[/yellow]\n"
+            "The policy is set by [cyan]SWITCHBOARD_GUARDRAILS_MODE[/cyan] "
+            f"(currently '{settings.guardrails_mode}')."
+        )
+        return
+
+    examined = sum(count for _, _, count, _ in rows)
+    flagged = sum(count for label, _, count, _ in rows if label != "clean")
+
+    table = Table(title=f"Usage policy this month ({examined:,} requests examined)")
+    table.add_column("Category")
+    table.add_column("Action")
+    table.add_column("Requests", justify="right")
+    table.add_column("Simulated cost", justify="right")
+    for label, action, count, cost in rows:
+        table.add_row(label, action, f"{count:,}", f"${cost:.4f}")
+    console.print(table)
+
+    share = 100.0 * flagged / examined if examined else 0.0
+    console.print(f"[dim]{flagged:,} flagged ({share:.1f}% of examined "
+                  "traffic).[/dim]")
+
+    if rule_counts := ledger.flagged_rules():
+        rules = Table(title="Rules doing the flagging")
+        rules.add_column("Rule")
+        rules.add_column("Times", justify="right")
+        for name, count in rule_counts[:15]:
+            rules.add_row(name, f"{count:,}")
+        console.print(rules)
+        console.print(
+            "[dim]A rule near the top that keeps catching real work is a rule "
+            "to delete. Point SWITCHBOARD_GUARDRAILS_FILE at your own rule "
+            "file; it replaces the built-in set rather than adding to it.[/dim]"
+        )
+
+    console.print(
+        "\n[dim]A keyword match, not a judgement about a person. Use it to "
+        "decide whether to go and look, never as evidence on its own.[/dim]"
     )
 
 

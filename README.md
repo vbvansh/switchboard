@@ -32,6 +32,7 @@ subject to per-request latency, cost and quality limits. What works today:
 - Per-user rate limiting and a Prometheus `/metrics` endpoint
 - Shadow mode: measure routing on your own traffic before trusting it
 - A dependency-free `/dashboard` page
+- A usage policy that flags personal requests and reports its own error rate
 
 | Phase | | |
 |---|---|---|
@@ -40,7 +41,11 @@ subject to per-request latency, cost and quality limits. What works today:
 | C | The routing brain | done — routing is live |
 | D | Caching, retries, failover, rate limits, metrics | done |
 | E | Shadow mode + dashboard | done |
-| F | Guardrails, docs, write-up | |
+| F | Guardrails, docs, write-up | done |
+
+**Documentation:** [Architecture](docs/ARCHITECTURE.md) - how it is put
+together and what happens to one request. [Results](docs/RESULTS.md) -
+every measured number, and what each one does not prove.
 
 ## Why this exists
 
@@ -585,6 +590,99 @@ truly have cost more. This is labelled as a projection everywhere it appears.
 produced to grade. What it can report is the router's own predicted probability
 of success — a forecast, not evidence.
 
+## Usage policy: is this actually work?
+
+Every organisation that puts an LLM gateway in front of its engineers eventually
+asks how much of the bill is real work. Switchboard can answer that **without
+becoming the thing everybody hates.**
+
+```powershell
+python -m switchboard guardrails check "Plan my holiday to Goa next month"
+python -m switchboard guardrails calibrate
+python -m switchboard guardrails report
+```
+
+Three modes, set with `SWITCHBOARD_GUARDRAILS_MODE`:
+
+| Mode | Behaviour |
+|---|---|
+| `off` | do nothing |
+| **`flag`** (default) | score every request, label it in the ledger, **serve it normally** |
+| `block` | refuse flagged requests with `403`, with an override header |
+
+**Why the default flags instead of blocking.** The mistakes are not symmetric.
+Missing a personal request costs a fraction of a cent. Wrongly blocking a real
+one stops an engineer working, at the moment they are trying to work, with an
+error message accusing them of slacking. The second is far worse, and far more
+likely — the detector is regular expressions, and human language is not.
+
+So the rules are biased towards letting things through. Technical content in a
+prompt (code fences, stack traces, SQL, file paths) **subtracts** from the
+score, and rules have weights: a phrase that could only be personal trips on its
+own, one that turns up in real tickets needs a second signal.
+
+### It reports its own error rate
+
+```
+Usage policy on 70 labelled prompts
+  False-positive rate (the one that matters)    0.0%   (0 of 45 work prompts)
+  Personal prompts caught (recall)             84.0%
+  Precision                                   100.0%
+
+Personal prompts this missed:
+  - Help me pick a birthday gift for my mum
+  - Which phone should I buy under 30000 rupees?
+  - Tell me a joke about cats
+  - My son has a school project on volcanoes, help him write it
+```
+
+**Read the caveat before quoting those numbers.** The 70 labelled prompts were
+written by hand by this project's author, so they flatter the detector. They are
+a smoke test, not evidence about your team. Run `flag` mode for a week, export
+the flagged requests and label them yourself — that is the calibration set that
+means anything.
+
+### Overriding a block
+
+If `block` mode gets it wrong, the refusal says so and says what to do:
+
+```
+This request was held by your organisation's usage policy (category: personal;
+matched: holiday_planning). This check is a keyword match and it does get
+things wrong. If this is work, resend it with the header
+'x-switchboard-policy-override: <short reason>' and it will go through.
+```
+
+The override is a speed bump, not a security control. It is recorded with its
+reason, so overrides are visible in the report.
+
+### Your own rules
+
+Start from [guardrails.example.yaml](guardrails.example.yaml):
+
+```yaml
+# SWITCHBOARD_GUARDRAILS_FILE=guardrails.yaml
+rules:
+  - name: holiday_planning
+    label: personal
+    weight: 1.0          # 1.0 trips on its own; 0.5 needs a second signal
+    # SINGLE quotes. In double-quoted YAML `\b` means backspace, not a regex
+    # word boundary, and the pattern would silently never match.
+    pattern: '\b(plan|book) (my|our) (holiday|vacation)\b'
+```
+
+The file **replaces** the built-in rules rather than adding to them, so a
+shipped rule that keeps catching your team's real work can actually be removed.
+`switchboard guardrails report` shows which rules are doing the flagging, which
+is how you find the one to delete.
+
+### What it stores
+
+The category and the names of the rules that matched. **Never the prompt text.**
+A feature built to police what people type must not become the reason a company
+starts recording what people type — that stays behind
+`SWITCHBOARD_STORE_PROMPTS`, off by default, exactly as before.
+
 ## Dashboard
 
 `GET /dashboard` renders spend, savings, per-model traffic, cache hit rate and
@@ -720,10 +818,10 @@ pytest
 |---|-----------|--------|
 | 1 | OpenAI-compatible proxy | done |
 | 2 | Ledger: users, budgets, simulated cost accounting | done |
-| 3 | Baseline strategies + live eval harness (first real numbers) | next |
-| 4 | Embedding classifier and cascade routing | |
-| 5 | Guardrails, with honest false-positive-rate reporting | |
-| 6 | Offline replay, Pareto plots, dashboard, writeup | |
+| 3 | Baseline strategies + live eval harness (first real numbers) | done |
+| 4 | Embedding classifier and cascade routing | done |
+| 5 | Guardrails, with honest false-positive-rate reporting | done |
+| 6 | Offline replay, Pareto plots, dashboard, writeup | done |
 
 ## Model tiers
 

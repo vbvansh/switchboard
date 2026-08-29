@@ -44,7 +44,7 @@ COPY --chown=switchboard:switchboard switchboard/ ./switchboard/
 COPY --chown=switchboard:switchboard migrations/ ./migrations/
 COPY --chown=switchboard:switchboard docker/entrypoint.sh ./docker/entrypoint.sh
 COPY --chown=switchboard:switchboard alembic.ini providers.yaml pyproject.toml \
-     LICENSE NOTICE README.md ./
+     guardrails.example.yaml LICENSE NOTICE README.md ./
 
 # The default SQLite database lives here. Mount a volume over it to keep the
 # ledger across container replacements - without one, every restart loses all

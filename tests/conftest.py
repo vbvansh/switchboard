@@ -149,6 +149,7 @@ def client(
 
     from switchboard import api
     from switchboard.cache import ResponseCache
+    from switchboard.guardrails import MODE_OFF, Guardrails
     from switchboard.metrics import build_registry
     from switchboard.ratelimit import RateLimiter
 
@@ -162,6 +163,10 @@ def client(
     # rate-limit tests set their own.
     api.app.state.limiter = RateLimiter(default_limit=10_000)
     api.app.state.metrics = build_registry()
+    # Off unless a test asks for it, so the policy cannot quietly change the
+    # outcome of a test about something else. tests/test_guardrails.py turns it
+    # on deliberately.
+    api.app.state.guardrails = Guardrails(mode=MODE_OFF)
     api.app.state.database = database
     api.app.state.ledger = ledger
     return TestClient(api.app)

@@ -25,6 +25,9 @@ STATUS_CLIENT_ERROR = "client_error"
 # Served from the response cache. Recorded so hits are visible in usage
 # reports, and priced at zero because nothing was actually bought.
 STATUS_CACHED = "cached"
+# Refused by the usage policy in `block` mode. Recorded so a refusal is
+# visible and arguable, and priced at zero because nothing was bought.
+STATUS_BLOCKED_POLICY = "blocked_policy"
 
 #: Statuses that represent a request the user actually made and got an
 #: answer for. A cache hit belongs here: it happened, it counts, and it
@@ -213,13 +216,16 @@ class LedgerService:
         routing_reason: str | None = None,
         shadow_model: str | None = None,
         shadow_cost_usd: float | None = None,
+        guardrail_label: str | None = None,
+        guardrail_action: str | None = None,
+        guardrail_rules: str | None = None,
     ) -> RequestLog:
         # A cache hit bought nothing, so it costs nothing. The BASELINE is
         # still what those tokens would have cost on the top-tier model, which
         # is exactly the saving the cache produced.
         cost = (
             0.0
-            if status == STATUS_CACHED
+            if status in (STATUS_CACHED, STATUS_BLOCKED_POLICY)
             else self._prices.cost(served_model, prompt_tokens, completion_tokens)
         )
         baseline = self._prices.baseline_cost(prompt_tokens, completion_tokens)
@@ -247,6 +253,9 @@ class LedgerService:
             routing_reason=routing_reason,
             shadow_model=shadow_model,
             shadow_cost_usd=shadow_cost_usd,
+            guardrail_label=guardrail_label,
+            guardrail_action=guardrail_action,
+            guardrail_rules=guardrail_rules,
             prompt_json=(
                 json.dumps(messages, ensure_ascii=False)
                 if self._store_prompts and messages is not None
@@ -274,6 +283,54 @@ class LedgerService:
                     .where(RequestLog.shadow_model.is_not(None))
                 )
             )
+
+    def guardrail_counts(
+        self, now: datetime | None = None
+    ) -> list[tuple[str, str, int, float]]:
+        """(label, action, requests, cost) this month for examined requests.
+
+        Rows where the policy was off are excluded at the query. Counting them
+        as "allowed" would let someone report a clean month that was never
+        actually examined.
+        """
+        now = now or utcnow()
+        with self._db.session() as session:
+            rows = session.execute(
+                select(
+                    RequestLog.guardrail_label,
+                    RequestLog.guardrail_action,
+                    func.count(RequestLog.id),
+                    func.coalesce(func.sum(RequestLog.simulated_cost_usd), 0.0),
+                )
+                .where(RequestLog.created_at >= month_start(now))
+                .where(RequestLog.guardrail_action.is_not(None))
+                .group_by(RequestLog.guardrail_label, RequestLog.guardrail_action)
+                .order_by(func.count(RequestLog.id).desc())
+            ).all()
+        return [
+            (str(label or "clean"), str(action), int(count), float(cost))
+            for label, action, count, cost in rows
+        ]
+
+    def flagged_rules(self, now: datetime | None = None) -> list[tuple[str, int]]:
+        """Which rules are doing the flagging, busiest first.
+
+        This is the list an operator uses to find a rule that keeps tripping on
+        their team's real work, so they can delete it from a custom rule file.
+        """
+        now = now or utcnow()
+        counts: dict[str, int] = {}
+        with self._db.session() as session:
+            rows = session.scalars(
+                select(RequestLog.guardrail_rules)
+                .where(RequestLog.created_at >= month_start(now))
+                .where(RequestLog.guardrail_rules.is_not(None))
+            )
+            for value in rows:
+                for name in str(value).split(","):
+                    if name := name.strip():
+                        counts[name] = counts.get(name, 0) + 1
+        return sorted(counts.items(), key=lambda kv: -kv[1])
 
     def by_model(self, now: datetime | None = None) -> list[tuple[str, int, float]]:
         """(model, requests, cost) this month, busiest first."""
