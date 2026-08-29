@@ -24,6 +24,7 @@ flowchart TB
     end
 
     subgraph sb [Switchboard]
+      SITE["site.py<br/>landing page at /"]
       API["api.py<br/>OpenAI-compatible HTTP"]
       GUARD["guardrails.py<br/>usage policy"]
       ROUTE["routing/<br/>which model?"]
@@ -34,9 +35,9 @@ flowchart TB
     end
 
     subgraph up [Model providers]
-      OLL["Ollama<br/>local"]
-      OAI["OpenAI"]
-      OR["OpenRouter / Groq /<br/>Together / vLLM"]
+      OLL["Ollama / vLLM<br/>local"]
+      OAI["OpenAI format<br/>OpenAI, Groq, OpenRouter, ..."]
+      NAT["Anthropic, Gemini<br/>translated natively"]
     end
 
     DB[("SQLite or<br/>PostgreSQL")]
@@ -48,7 +49,7 @@ flowchart TB
     API --> POOL
     POOL --> OLL
     POOL --> OAI
-    POOL --> OR
+    POOL --> NAT
     API --> LEDGER
     LEDGER --> DB
     DASH --> DB
@@ -128,6 +129,9 @@ file ever stays correct.
 **Two providers may declare the same model.** That is not a conflict — it is
 failover. If Groq is down, the same model is served from OpenRouter.
 
+A provider's `type` selects its adapter. Three exist: `openai-compatible`,
+`anthropic`, and `gemini`.
+
 ### `routing/` — which model should answer
 
 Three layers:
@@ -183,8 +187,11 @@ answer to a question nobody asked is worse than no cache.
 
 ### `providers/` — talking to models
 
-- `openai_compatible.py` — one adapter, because every provider worth supporting
-  speaks this dialect.
+- `openai_compatible.py` — covers most of the industry, because most of the
+  industry copied OpenAI's format.
+- `anthropic.py`, `gemini.py` — the two that did not. See below.
+- `sse.py` — reassembles streamed events from network chunks that do not line
+  up with them.
 - `pool.py` — holds the clients, knows which providers can serve a model, and
   enforces `LOCAL_ONLY`.
 - `retry.py` — exponential backoff with jitter, for *transient* failures only
@@ -198,6 +205,60 @@ Failover rule: a provider that raises or returns 5xx is a failure, and the next
 provider is tried. **A 4xx is not a failover** — the request itself is wrong and
 every other provider would reject it identically, so retrying elsewhere just
 multiplies the cost of one bad request by the number of providers configured.
+
+### Adapters — making every provider look the same
+
+Switchboard speaks OpenAI to your application, always, in both directions. Most
+providers copied that format, so `openai_compatible.py` covers them by
+forwarding requests untouched.
+
+Anthropic and Google did not, so `anthropic.py` and `gemini.py` translate. Four
+differences do the damage if missed:
+
+| | OpenAI | Anthropic | Gemini |
+|---|---|---|---|
+| System prompt | a message in the list | a separate `system` field | `systemInstruction` |
+| The assistant | `role: "assistant"` | same | `role: "model"` |
+| `max_tokens` | optional | **required** | `maxOutputTokens` |
+| Token counts | `prompt_tokens` | `input_tokens` | `promptTokenCount` |
+
+The last row is the dangerous one. Getting it wrong does not crash anything — it
+records every request to that provider as costing zero, and the savings report
+looks wonderful. There is a test named after exactly that failure.
+
+Streaming is translated too, and the rebuilt stream ends with a usage chunk in
+the shape `streaming.py` already reads, so the ledger needs no special case per
+vendor.
+
+**Tool calls are deliberately not translated.** Their formats differ in more
+than naming, and a half-working translation fails deep inside somebody's agent
+with a confusing error. A request carrying `tools` is refused with a message
+pointing at OpenRouter, which implements them.
+
+### `discovery.py` — asking a provider what it has
+
+Format translation makes a provider *callable*. Discovery is what makes it
+*bearable*: hand-typing three hundred model names and prices is not a plan.
+
+`switchboard discover <provider>` asks, parses the answer, and prints YAML.
+
+It refuses to invent a price. Only OpenRouter publishes prices through its API;
+everyone else publishes a bare list. Those models come back marked `REPLACE ME`
+and will not load until a human fills them in. A guessed price would flow
+straight into budget enforcement and savings reports and be wrong invisibly.
+
+It also does not rewrite `providers.yaml`. That file's comments explain why each
+model is priced as it is, and no automatic rewriter preserves them.
+
+### `site.py` — the public landing page
+
+Served at `/` by the same process as the API, so there is one deploy, one URL,
+and no separate marketing site to drift out of date. Same construction rules as
+the dashboard: server-rendered, inline CSS, one inline script, nothing external.
+
+The content rule is enforced by a test: every number on the page must also
+appear in `docs/RESULTS.md`. A landing page that quietly advertises a figure
+nobody can reproduce is the exact failure this project is built against.
 
 ### `ledger/` — who spent what
 

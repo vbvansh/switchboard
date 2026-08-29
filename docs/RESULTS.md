@@ -241,6 +241,11 @@ Stated plainly, because a results document that only lists wins is marketing.
 - **No human evaluation.** Correctness comes from the benchmark answer keys.
   There is no LLM judge anywhere in this project, deliberately: grading with a
   model would make the results depend on a model.
+- **The Anthropic and Gemini adapters have never been run against a live API.**
+  They are written to the published specifications and covered by tests using
+  recorded response shapes, which proves the translation matches the documented
+  format. It does not prove the format is still current. Only a call with a real
+  key does that, and nobody has made one.
 
 ---
 

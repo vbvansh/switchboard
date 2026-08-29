@@ -11,12 +11,14 @@ from __future__ import annotations
 import logging
 
 from switchboard.catalog import ModelCatalog, ProviderSpec
+from switchboard.providers.anthropic import AnthropicProvider
 from switchboard.providers.base import (
     Provider,
     ProviderNotConfigured,
     ProviderUnavailable,
 )
 from switchboard.providers.breaker import CircuitBreaker
+from switchboard.providers.gemini import GeminiProvider
 from switchboard.providers.openai_compatible import OpenAICompatibleProvider
 from switchboard.providers.retry import RetryPolicy
 
@@ -25,6 +27,8 @@ logger = logging.getLogger(__name__)
 #: provider type -> adapter class. Adding a provider type means adding a line.
 ADAPTERS: dict[str, type[Provider]] = {
     "openai-compatible": OpenAICompatibleProvider,
+    "anthropic": AnthropicProvider,
+    "gemini": GeminiProvider,
 }
 
 

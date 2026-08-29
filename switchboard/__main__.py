@@ -216,6 +216,141 @@ def providers() -> None:
 
 
 @cli.command()
+def discover(
+    provider_id: str = typer.Argument(..., help="A provider id from providers.yaml."),
+    tier: str = typer.Option("T2", "--tier", help="Tier to assign to every model."),
+    contains: str = typer.Option(
+        "", "--contains", help="Only models whose id contains this text."
+    ),
+    limit: int = typer.Option(0, "--limit", help="Cap how many are printed."),
+    out: Path = typer.Option(
+        None, "--out", help="Write the YAML block to a file instead of the screen."
+    ),
+) -> None:
+    """Ask a provider which models it has, and print YAML you can paste.
+
+    This is the half of "supports every model" that people forget. Translating
+    formats makes a provider callable; discovery is what makes it bearable,
+    because otherwise you hand-type three hundred model names and prices.
+
+    It does NOT edit providers.yaml for you. That file is full of comments
+    explaining why each model is priced the way it is, and no automatic
+    rewriter preserves those. Losing them to save one paste is a bad trade.
+
+    It also never invents a price. Only OpenRouter publishes prices in its API;
+    for everyone else the price lines come out marked REPLACE ME, and the block
+    will not load until a human fills them in. A guessed price would flow
+    straight into budget enforcement and savings reports and be wrong in a way
+    nobody could see.
+    """
+    import asyncio
+
+    from switchboard import discovery
+    from switchboard.providers import ADAPTERS
+
+    catalog = _catalog()
+    spec = catalog.providers.get(provider_id)
+    if spec is None:
+        console.print(
+            f"[red]No provider {provider_id!r} in {settings.providers_file}[/red]"
+        )
+        console.print(f"Known: {', '.join(catalog.providers) or '(none)'}")
+        raise typer.Exit(code=1)
+
+    if not spec.key_is_available:
+        console.print(
+            f"[red]{provider_id} needs an API key.[/red] Set "
+            f"[cyan]{spec.api_key_env}[/cyan] in your environment or .env file."
+        )
+        raise typer.Exit(code=1)
+
+    adapter = ADAPTERS.get(spec.type)
+    if adapter is None:
+        console.print(f"[red]No adapter for provider type {spec.type!r}[/red]")
+        raise typer.Exit(code=1)
+
+    async def fetch():
+        provider = adapter(spec)
+        try:
+            response = await provider.list_models()
+            return response.status_code, response.content
+        finally:
+            await provider.aclose()
+
+    console.print(f"Asking [cyan]{spec.base_url}[/cyan] what it has...")
+    try:
+        status, body = asyncio.run(fetch())
+    except Exception as exc:
+        console.print(f"[red]Could not reach {provider_id}: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if status >= 400:
+        console.print(f"[red]{provider_id} returned HTTP {status}[/red]")
+        console.print(f"[dim]{body[:400].decode('utf-8', 'replace')}[/dim]")
+        raise typer.Exit(code=1)
+
+    try:
+        models = discovery.parse(spec.type, spec.base_url, body)
+    except discovery.DiscoveryError as exc:
+        console.print(f"[red]Could not read the model list: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if contains:
+        models = [m for m in models if contains.lower() in m.id.lower()]
+    known = set(spec.model_ids)
+    fresh = [m for m in models if m.id not in known]
+
+    console.print(f"[green]{discovery.summarise(models)}[/green]")
+    if len(fresh) != len(models):
+        console.print(
+            f"[dim]{len(models) - len(fresh)} already in providers.yaml, "
+            "skipped.[/dim]"
+        )
+    if limit:
+        fresh = fresh[:limit]
+
+    if not fresh:
+        console.print("Nothing new to add.")
+        return
+
+    table = Table(title=f"New models from {provider_id}")
+    table.add_column("Model")
+    table.add_column("Context", justify="right")
+    table.add_column("In $/Mtok", justify="right")
+    table.add_column("Out $/Mtok", justify="right")
+    for model in sorted(fresh, key=lambda m: m.id)[:40]:
+        table.add_row(
+            model.id,
+            f"{model.context_window:,}" if model.context_window else "-",
+            f"{model.input_per_mtok:g}" if model.priced else "[yellow]?[/yellow]",
+            f"{model.output_per_mtok:g}" if model.priced else "[yellow]?[/yellow]",
+        )
+    console.print(table)
+    if len(fresh) > 40:
+        console.print(f"[dim]... and {len(fresh) - 40} more, all in the YAML.[/dim]")
+
+    block = discovery.to_yaml(fresh, tier=tier)
+
+    if out:
+        Path(out).write_text(block, encoding="utf-8")
+        console.print(f"\nYAML written to [cyan]{out}[/cyan]")
+    else:
+        console.print(
+            "\n[bold]Paste this under the provider\'s `models:` key:[/bold]\n"
+        )
+        console.print(block)
+
+    unpriced = [m for m in fresh if not m.priced]
+    if unpriced:
+        console.print(
+            f"[yellow]{len(unpriced)} models have no published price.[/yellow] "
+            "Their price lines are marked REPLACE ME and the catalog will "
+            "refuse to load until you fill them in - on purpose. A guessed "
+            "price would silently corrupt every budget and savings figure."
+        )
+
+
+@cli.command()
 def check() -> None:
     """Verify every enabled provider is reachable."""
     import asyncio

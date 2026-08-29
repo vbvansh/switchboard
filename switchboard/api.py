@@ -57,6 +57,8 @@ from switchboard.routing.base import RoutingContext
 from switchboard.routing.live import RequestLimits, build_router
 from switchboard.schema import require_up_to_date
 from switchboard.shadow import estimate_cost, summarise
+from switchboard.site import SiteContext
+from switchboard.site import render as render_site
 from switchboard.streaming import UsageSniffer, request_usage_in_stream
 
 
@@ -229,6 +231,31 @@ def _routing_status(request: Request) -> dict[str, Any]:
         "models": router.routable_models,
         "trained": router.metadata.describe(),
     }
+
+
+@app.get("/")
+async def landing(request: Request) -> Response:
+    """The public landing page.
+
+    Served from the same process as the API so there is one deploy and one URL,
+    and so the numbers on the page come from the same repository as the docs
+    that justify them. A separate marketing site is a second thing to keep in
+    sync, and it always drifts.
+    """
+    pool: ProviderPool = request.app.state.pool
+    return Response(
+        content=render_site(
+            SiteContext(
+                version=app.version,
+                # A hosting platform cannot run a local model, so a public
+                # instance normally has nothing to route to. Saying so on the
+                # page is better than letting a visitor discover it by getting
+                # a 503 from an endpoint they expected to work.
+                demo_mode=not pool.available_models(),
+            )
+        ),
+        media_type="text/html; charset=utf-8",
+    )
 
 
 @app.get("/dashboard")

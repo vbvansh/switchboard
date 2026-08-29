@@ -33,6 +33,8 @@ subject to per-request latency, cost and quality limits. What works today:
 - Shadow mode: measure routing on your own traffic before trusting it
 - A dependency-free `/dashboard` page
 - A usage policy that flags personal requests and reports its own error rate
+- Native Anthropic and Gemini adapters, plus model discovery from any provider
+- A public landing page served by the app itself, deployable in one step
 
 | Phase | | |
 |---|---|---|
@@ -42,10 +44,13 @@ subject to per-request latency, cost and quality limits. What works today:
 | D | Caching, retries, failover, rate limits, metrics | done |
 | E | Shadow mode + dashboard | done |
 | F | Guardrails, docs, write-up | done |
+| G | Universal providers: native Anthropic + Gemini, model discovery | done |
+| H | Public landing page and one-step deployment | done |
 
 **Documentation:** [Architecture](docs/ARCHITECTURE.md) - how it is put
 together and what happens to one request. [Results](docs/RESULTS.md) -
 every measured number, and what each one does not prove.
+[Deploy](DEPLOY.md) - putting it on a public URL.
 
 ## Why this exists
 
@@ -376,6 +381,72 @@ See what providers and models are configured, and check they are reachable:
 python -m switchboard providers
 python -m switchboard check
 ```
+
+## Which models it works with
+
+Three kinds of provider, and adding any of them is editing a text file.
+
+**1. Anything speaking OpenAI's format** — most of the industry, because most of
+the industry copied it. One adapter covers all of them:
+
+> OpenAI, Groq, Together, Fireworks, DeepSeek, Mistral, xAI, Perplexity,
+> Cerebras, SambaNova, DeepInfra, Nvidia NIM, Azure OpenAI, OpenRouter, and every
+> self-hosted server: Ollama, vLLM, LM Studio, llama.cpp, TGI.
+
+**2. Anthropic and Google, natively.** They did not copy the format, so
+Switchboard translates for them:
+
+```yaml
+  - id: anthropic
+    type: anthropic          # <- selects the translating adapter
+    base_url: https://api.anthropic.com/v1
+    api_key_env: ANTHROPIC_API_KEY
+    enabled: true
+```
+
+Your application still sends and receives OpenAI-shaped requests. The
+translation handles the four differences that matter — the system prompt is a
+separate field, `max_tokens` is mandatory, content comes back as a list, and
+token counts have different names. That last one is the dangerous one: get it
+wrong and every Claude request records as costing nothing, with no error
+anywhere.
+
+**Tool calls are not translated.** The native adapters cover chat and streaming.
+For tool calling, reach those models through OpenRouter, which implements it. An
+honest gap beats a translation that fails deep inside somebody's agent.
+
+**The adapters are written to the published API specifications and covered by
+tests using recorded response shapes — but nobody has run them against a paid
+key yet.** Stated here rather than left for you to discover.
+
+**3. Your own hardware.** Ollama, vLLM, LM Studio, llama.cpp, TGI. With
+`SWITCHBOARD_LOCAL_ONLY=true`, startup fails if any enabled provider is
+off-machine.
+
+### Model discovery
+
+Hand-typing three hundred model names and prices is not a plan:
+
+```powershell
+python -m switchboard discover openrouter
+python -m switchboard discover openrouter --contains claude --limit 5
+python -m switchboard discover gemini --out gemini-models.yaml
+```
+
+It asks the provider what it has and prints YAML to paste under that provider's
+`models:` key.
+
+**It will not invent a price.** OpenRouter publishes real per-token prices
+through its API, so those come back ready to use. OpenAI, Anthropic, Google and
+every local server publish no prices at all — those models come back with their
+price lines marked `REPLACE ME`, and the catalog will not load until a human
+fills them in. That is deliberate: a price this project guessed would flow
+straight into budget enforcement and savings reports and be wrong in a way
+nobody could see from the outside.
+
+It also does not edit `providers.yaml` for you. That file is full of comments
+explaining why each model is priced as it is, and no automatic rewriter
+preserves them.
 
 ## Adding a provider
 
@@ -797,6 +868,45 @@ correct — record that fact without re-creating them:
 ```powershell
 python -m switchboard db stamp-baseline
 ```
+
+## The website, and putting it online
+
+Switchboard serves its own landing page at `/`, so one deploy gives you the
+site, the dashboard, the API and the metrics endpoint at a single address.
+There is no separate frontend to host and nothing to build.
+
+```
+https://your-app.onrender.com/            the landing page
+https://your-app.onrender.com/dashboard   spend and savings
+https://your-app.onrender.com/health      status
+https://your-app.onrender.com/v1/...      the OpenAI-compatible API
+```
+
+The page is written under the same rules as the dashboard — server-rendered
+HTML, inline CSS, one small inline script, nothing from a CDN. It renders on a
+machine with no internet, and no third party learns who visited.
+
+One content rule keeps it honest: **every number on the page also appears in
+[docs/RESULTS.md](docs/RESULTS.md) with its method beside it, and a test fails
+if they drift apart.** The limitations section is not a disclaimer at the
+bottom; it is a section with the same weight as the results.
+
+See **[DEPLOY.md](DEPLOY.md)** for the walkthrough — Render, Railway, Fly.io and
+a plain server — plus the three settings that silently break a deploy if you
+miss them:
+
+- bind to `0.0.0.0`, not `127.0.0.1`, or the platform reports a startup timeout
+- point the health check at `/health/live`, not `/health/ready` — a deployed
+  instance normally has no provider, so readiness is `503` by design and the
+  service would restart forever
+- a free plan has no persistent disk, so SQLite loses every user and every
+  spending record on redeploy; attach PostgreSQL for anything real
+
+**There is no sign-up on the website.** It is informational; API keys are
+created by an administrator with `switchboard users add`. Web accounts mean
+passwords, sessions, email verification and account recovery — a real security
+surface that deserves its own phase rather than being tacked onto a landing
+page.
 
 ## Licence
 

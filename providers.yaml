@@ -107,13 +107,37 @@ providers:
   # price list and correct them before trusting any cost figure.
   # ---------------------------------------------------------------------------
 
-  # OpenRouter is the most useful single entry: one key reaches models from
-  # many vendors, including Anthropic's Claude, through the OpenAI-compatible
-  # format. That is how to use Claude here without a separate adapter.
+  # OpenRouter reaches models from many vendors with one key, and it is the
+  # only provider that publishes PRICES through its API - so
+  # `switchboard discover openrouter` returns hundreds of models ready to
+  # paste, with real numbers. Start here.
   - id: openrouter
     type: openai-compatible
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
+    enabled: false
+    models: []
+
+  # Anthropic's own API, spoken natively. Claude is also reachable through
+  # OpenRouter above; the difference is that this one has no middleman, no
+  # markup and no third-party outage between you and Anthropic.
+  #
+  # `type: anthropic` selects the translating adapter. Tool calls are NOT
+  # translated - use OpenRouter for those. See switchboard/providers/anthropic.py.
+  - id: anthropic
+    type: anthropic
+    base_url: https://api.anthropic.com/v1
+    api_key_env: ANTHROPIC_API_KEY
+    enabled: false
+    models: []
+
+  # Google Gemini, spoken natively. Same trade-off as Anthropic above.
+  # Run `switchboard discover gemini` to list the models, then fill in prices
+  # from Google's price page - their API does not publish them.
+  - id: gemini
+    type: gemini
+    base_url: https://generativelanguage.googleapis.com/v1beta
+    api_key_env: GEMINI_API_KEY
     enabled: false
     models: []
 

@@ -1,0 +1,78 @@
+# Render deployment blueprint.
+#
+#   1. Push this repository to GitHub.
+#   2. On render.com: New -> Blueprint -> pick the repo.
+#   3. Render reads this file, builds the Dockerfile, and gives you an HTTPS URL.
+#
+# See DEPLOY.md for the full walkthrough, including Railway, Fly.io and a VPS.
+#
+# THREE THINGS HERE ARE LOAD-BEARING. Each one is a way a deploy silently fails.
+
+services:
+  - type: web
+    name: switchboard
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+
+    # (1) HEALTH CHECK POINTS AT LIVENESS, NOT READINESS.
+    #
+    # /health/ready returns 503 when no model provider is reachable - which is
+    # the NORMAL state on a hosting platform, because a platform cannot run
+    # Ollama. Pointed at /health/ready, Render would mark the service unhealthy
+    # and restart it forever, and the logs would say nothing useful.
+    #
+    # /health/live answers "is this process alive", which is the question a
+    # platform restart should actually be based on.
+    healthCheckPath: /health/live
+
+    envVars:
+      # (2) BIND TO ALL INTERFACES.
+      #
+      # The default is 127.0.0.1, which is right on a laptop and useless in a
+      # container: nothing outside could reach it, and the deploy would look
+      # like a startup hang.
+      - key: SWITCHBOARD_HOST
+        value: 0.0.0.0
+
+      # (3) THE DATABASE.
+      #
+      # Render's free plan has NO persistent disk. SQLite here means the ledger
+      # is wiped on every deploy and every restart - fine for a public demo,
+      # wrong for anything real.
+      #
+      # For real use, uncomment the `databases:` block at the bottom and this
+      # fromDatabase reference, which swaps in managed PostgreSQL.
+      - key: SWITCHBOARD_DATABASE_URL
+        value: sqlite:////app/data/switchboard.db
+      # - key: SWITCHBOARD_DATABASE_URL
+      #   fromDatabase:
+      #     name: switchboard-db
+      #     property: connectionString
+
+      # Off, and it should stay off on anything public. Turning it on records
+      # the full text of every request.
+      - key: SWITCHBOARD_STORE_PROMPTS
+        value: "false"
+
+      # Labels requests that look personal; refuses nothing. See the README.
+      - key: SWITCHBOARD_GUARDRAILS_MODE
+        value: flag
+
+      # Provider API keys. Add them in the Render dashboard, never here -
+      # this file is committed to git.
+      #
+      # - key: OPENROUTER_API_KEY
+      #   sync: false          # `sync: false` means "prompt me, do not store"
+      # - key: ANTHROPIC_API_KEY
+      #   sync: false
+      # - key: GROQ_API_KEY
+      #   sync: false
+
+# Managed PostgreSQL. Uncomment together with the fromDatabase block above.
+#
+# databases:
+#   - name: switchboard-db
+#     plan: free
+#     databaseName: switchboard
+#     user: switchboard

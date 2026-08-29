@@ -25,7 +25,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CATALOG_PATH = PROJECT_ROOT / "providers.yaml"
 
 #: Adapter types this build knows how to talk to.
-KNOWN_PROVIDER_TYPES = frozenset({"openai-compatible"})
+#
+# "openai-compatible" covers most of the industry, because most of the
+# industry copied OpenAI's request format. The other two exist because
+# Anthropic and Google did not, and going through a reseller to reach them
+# means paying a middleman and inheriting their outages.
+KNOWN_PROVIDER_TYPES = frozenset(
+    {"openai-compatible", "anthropic", "gemini"}
+)
 
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"})
 
