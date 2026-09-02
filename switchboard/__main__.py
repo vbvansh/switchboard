@@ -1266,7 +1266,7 @@ def bench_train(
 
     from eval.benchmarks.features import FeatureExtractor
 
-    predictor = learned.SuccessPredictor.train(
+    predictor = learned.train_from_grid(
         train_grid, texts, FeatureExtractor(mode=features), seed=seed
     )
 
@@ -1466,7 +1466,7 @@ def bench_sla(
     train_index, test_index = learned.split_questions(grid, test_size, seed)
     train_grid, test_grid = grid.subset(train_index), grid.subset(test_index)
 
-    predictor = learned.SuccessPredictor.train(
+    predictor = learned.train_from_grid(
         train_grid, texts, FeatureExtractor(mode=features), seed=seed
     )
     profile = constraints_mod.ModelProfile.from_grid(train_grid)
@@ -1669,7 +1669,7 @@ def router_train(
         f"Training on [cyan]{len(train_index):,}[/cyan] questions over "
         f"[cyan]{len(grid.models)}[/cyan] models ..."
     )
-    predictor = learned.SuccessPredictor.train(
+    predictor = learned.train_from_grid(
         train_grid, texts, FeatureExtractor(mode=features), seed=seed
     )
 
@@ -1700,6 +1700,203 @@ def router_train(
     # Show immediately whether this artifact can drive the local catalog -
     # finding out at server start would be a worse time.
     _report_router_mapping(metadata.models)
+
+
+@router_cli.command("data")
+def router_data() -> None:
+    """Can a router be trained from your own traffic yet, and if not, why not.
+
+    A benchmark-trained router does not understand short chat prompts. The fix
+    is to train on the traffic you actually serve - which needs somebody to say
+    whether each answer was any good, because real traffic has no answer key.
+    This reports how far along that is.
+    """
+    from switchboard import training
+
+    ledger = _ledger()
+    readiness = training.assess(
+        ledger.rated_requests(), ledger.served_counts(), settings.store_prompts
+    )
+
+    table = Table(title="Training data from your ledger")
+    table.add_column("Model")
+    table.add_column("Served", justify="right")
+    table.add_column("Rated", justify="right")
+    table.add_column("Good", justify="right")
+    table.add_column("Bad", justify="right")
+    table.add_column("Status")
+
+    for entry in readiness.models:
+        status = (
+            "[green]ready[/green]"
+            if entry.usable
+            else f"[yellow]{entry.blocker()}[/yellow]"
+        )
+        table.add_row(
+            entry.model,
+            f"{entry.served:,}",
+            f"{entry.rated:,}",
+            f"{entry.good:,}",
+            f"{entry.bad:,}",
+            status,
+        )
+    console.print(table)
+
+    period = f"; {readiness.period}" if readiness.period else ""
+    console.print(
+        f"[dim]{readiness.total_rated:,} of {readiness.total_served:,} served "
+        f"requests rated ({readiness.coverage_pct:.1f}%); "
+        f"{readiness.with_prompt_text:,} usable for training{period}.[/dim]"
+    )
+
+    if readiness.can_train:
+        models = ", ".join(m.model for m in readiness.usable_models)
+        console.print(
+            f"[green]Ready to train[/green] over {models}.\n"
+            "  Run: [cyan]switchboard router train-live[/cyan]"
+        )
+        return
+
+    console.print("\n[yellow]Not ready to train yet.[/yellow]")
+    for problem in readiness.blockers():
+        console.print(f"  [dim]-[/dim] {problem}")
+    console.print(
+        f"\n[dim]Thresholds: a model needs {training.MIN_PER_MODEL} rated "
+        f"requests with at least {training.MIN_PER_CLASS} of each verdict, and "
+        f"{training.MIN_MODELS} models must clear that. They are not "
+        "arbitrary: below them a classifier fits noise and then routes real "
+        "traffic on it.[/dim]"
+    )
+
+
+@router_cli.command("train-live")
+def router_train_live(
+    features: str = typer.Option("tfidf", help="surface | tfidf | embedding."),
+    test_size: float = typer.Option(0.3, help="Fraction held out for scoring."),
+    seed: int = typer.Option(0, help="Seed for the split and the classifiers."),
+    out: str = typer.Option("", help="Where to write the artifact."),
+    force: bool = typer.Option(
+        False, "--force", help="Train anyway, below the safety thresholds."
+    ),
+) -> None:
+    """Train a router on YOUR traffic, using the ratings your users gave.
+
+    This is the loop shadow mode exists to feed. A router trained here learns
+    over your catalog's own model names and your own prompt shapes, so it does
+    not suffer the distribution shift that makes a benchmark-trained router
+    close to useless on short chat messages.
+
+    It refuses to train on too little. `--force` overrides that, and is for
+    inspecting a result, never for serving traffic with one.
+    """
+    from switchboard import training
+    from switchboard.routing import artifact as artifact_mod
+
+    ledger = _ledger()
+    rows = ledger.rated_requests()
+    readiness = training.assess(rows, ledger.served_counts(), settings.store_prompts)
+
+    if not readiness.can_train and not force:
+        console.print("[red]Not enough rated traffic to train a router.[/red]")
+        for problem in readiness.blockers():
+            console.print(f"  [dim]-[/dim] {problem}")
+        console.print(
+            "\n[dim]See [cyan]switchboard router data[/cyan] for the full "
+            "picture. --force trains anyway, which is for inspecting a result, "
+            "not for serving traffic.[/dim]"
+        )
+        raise typer.Exit(code=1)
+
+    if force and not readiness.can_train:
+        console.print(
+            "[yellow]--force: training below the safety thresholds. The "
+            "resulting router is not fit to serve traffic.[/yellow]"
+        )
+
+    examples = training.collect(rows)
+    models = [m.model for m in readiness.usable_models] or sorted(
+        {e.model for e in examples}
+    )
+    train_set, test_set = training.split(examples, test_size, seed)
+
+    console.print(
+        f"Training on [cyan]{len(train_set):,}[/cyan] rated requests over "
+        f"[cyan]{len(models)}[/cyan] models "
+        f"([dim]{len(test_set):,} held out[/dim]) ..."
+    )
+
+    predictor = training.train(train_set, models, features=features, seed=seed)
+    if len(predictor.models) < training.MIN_MODELS and not force:
+        console.print(
+            f"[red]Only {len(predictor.models)} classifier(s) could be fitted; "
+            f"a router needs at least {training.MIN_MODELS}.[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    scores = training.score(predictor, test_set)
+
+    report = Table(title="Held-out prediction quality")
+    report.add_column("Model")
+    report.add_column("Held out", justify="right")
+    report.add_column("Base rate", justify="right")
+    report.add_column("AUC", justify="right")
+
+    aucs = []
+    for model, entry in sorted(scores.items()):
+        auc = entry["auc"]
+        if auc == auc:  # not NaN
+            aucs.append(auc)
+            colour = "green" if auc >= 0.65 else "yellow" if auc >= 0.55 else "red"
+            shown = f"[{colour}]{auc:.3f}[/{colour}]"
+        else:
+            shown = "[dim]not scorable[/dim]"
+        base = entry["base_rate"]
+        report.add_row(
+            model,
+            f"{entry['n']:,}",
+            f"{base:.0%}" if base == base else "-",
+            shown,
+        )
+    console.print(report)
+
+    mean_auc = sum(aucs) / len(aucs) if aucs else float("nan")
+
+    metadata = artifact_mod.RouterMetadata(
+        source="your ledger",
+        benchmark="",
+        features=predictor.extractor.describe(),
+        label_source="live traffic",
+        period=readiness.period,
+        models=list(predictor.models),
+        n_train_questions=len(train_set),
+        mean_auc=mean_auc,
+    )
+
+    destination = Path(out) if out else Path(settings.router_path)
+    artifact_mod.save(destination, predictor, metadata)
+
+    console.print(f"[green]Saved[/green] {destination}\n  {metadata.describe()}")
+    if mean_auc == mean_auc:
+        colour = (
+            "green" if mean_auc >= 0.65 else "yellow" if mean_auc >= 0.55 else "red"
+        )
+        console.print(
+            f"  mean held-out AUC: [{colour}]{mean_auc:.3f}[/{colour}] "
+            "(0.5 = guessing)"
+        )
+    else:
+        console.print(
+            "  [yellow]No model could be scored on held-out data.[/yellow] "
+            "There is not enough variety held back to tell whether this router "
+            "predicts anything at all. Collect more ratings."
+        )
+
+    console.print(
+        "\n[dim]Trained on your own traffic, so it knows your catalog's model "
+        "names directly - no benchmark_alias mapping needed. Restart the server "
+        "to load it, and consider running in shadow mode first to see what it "
+        "would do before letting it decide.[/dim]"
+    )
 
 
 @router_cli.command("info")

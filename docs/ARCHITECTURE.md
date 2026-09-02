@@ -145,6 +145,14 @@ Three layers:
   unsupported claim.
 - `live.py` — loads a trained artifact and drives it in the live API, applying
   per-request limits sent as headers.
+- `features.py`, `predictor.py` — turning a question into numbers, and one
+  classifier per model. **These live here, not in `eval/`, and that is
+  load-bearing.** A joblib pickle records the module each class came from,
+  and the Docker image does not copy `eval/`. While they lived there, no
+  trained router could load inside a container: the failure was caught
+  safely, routing switched itself off, and `/health` said "no router
+  artifact loaded" with nothing pointing at the cause. Anything a trained
+  artifact refers to has to ship with the server.
 
 A missing, corrupt, or stale router artifact **never stops the server.** Routing
 switches off, requests fall back to `default_model`, and `/health` says exactly
@@ -277,6 +285,31 @@ is never recoverable.
 Timestamps are naive UTC everywhere, because SQLite does not preserve timezone
 information and carrying tz-aware values through it invites comparison bugs that
 surface months later.
+
+### `training.py` — learning from your own traffic
+
+The loop shadow mode exists to feed, and the step that was missing between them.
+
+A benchmark ships with an answer key, so training on one is free. Real traffic
+has none — nobody wrote down the correct answer to "why is this test flaky" — so
+the ledger held thousands of questions and no outcomes. `POST /v1/feedback`
+supplies the missing half: every response carries an `X-Switchboard-Request-Id`,
+and the application sends back `good` or `bad`.
+
+No label is ever inferred. Guessing from behaviour ("they asked again, so it was
+wrong") is cheap and wrong often enough to matter, and a wrong label does not
+error — it quietly teaches the router something false.
+
+Training **refuses** below its thresholds: prompt storage on, 30 rated requests
+per model, 5 of each verdict, 2 models clearing both. Each exists to stop a
+specific failure, and the commonest is one-sided data — forty ratings that all
+say "good" would fit a classifier that answers yes to everything and then wins
+every routing decision.
+
+Live data is *sparse* (one model per request) where benchmark data is *dense*
+(every model per question), so each classifier trains only on the requests its
+own model handled. Flattening that into the dense shape would write a zero
+wherever a model was not asked.
 
 ### `shadow.py` — trying routing without risking anything
 

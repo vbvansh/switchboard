@@ -23,24 +23,35 @@ scored on its training data measures memory rather than judgement.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
-from eval.benchmarks.features import FeatureExtractor
 from eval.benchmarks.schema import Grid
 from switchboard.routing.base import RoutingContext, RoutingDecision, RoutingStrategy
+from switchboard.routing.features import FeatureExtractor
+from switchboard.routing.predictor import (
+    CORRECT_THRESHOLD,
+    ConstantPredictor,
+    SuccessPredictor,
+)
 
 logger = logging.getLogger(__name__)
 
-#: A model is treated as having answered correctly above this score. Most
-#: benchmarks here are already 0/1; the few graded ones (F1 on squad) need a
-#: line drawn somewhere, and half credit is the natural place.
-CORRECT_THRESHOLD = 0.5
-
 DEFAULT_TEST_SIZE = 0.3
 DEFAULT_SEED = 0
+
+__all__ = [
+    "CORRECT_THRESHOLD",
+    "ConstantPredictor",
+    "LearnedRouter",
+    "SuccessPredictor",
+    "build_router",
+    "routers_for_thresholds",
+    "split_questions",
+    "train_from_grid",
+    "training_report",
+]
 
 
 def split_questions(
@@ -62,96 +73,25 @@ def split_questions(
     return questions[np.sort(train)], questions[np.sort(test)]
 
 
-class _ConstantPredictor:
-    """Stands in when a model was right (or wrong) on every training question.
+def train_from_grid(
+    grid: Grid,
+    texts: dict[tuple[str, str], str],
+    extractor: FeatureExtractor | None = None,
+    seed: int = DEFAULT_SEED,
+) -> SuccessPredictor:
+    """Turn a benchmark grid into the shape `SuccessPredictor.fit` expects.
 
-    Logistic regression cannot fit a single-class target. Rather than dropping
-    the model - which would quietly remove it from routing - its probability is
-    fixed at what the training data showed.
+    The grid is dense - every question answered by every model - so each model
+    gets a label for every question. Live traffic is the opposite: one model
+    per request. Both end up as {model: 0/1 array} over a shared list of texts,
+    which is why the trainer itself does not need to know where they came from.
     """
-
-    def __init__(self, probability: float) -> None:
-        self.probability = float(probability)
-
-    def predict_proba(self, features: np.ndarray) -> np.ndarray:
-        column = np.full((len(features), 1), self.probability)
-        return np.hstack([1.0 - column, column])
-
-
-@dataclass
-class SuccessPredictor:
-    """One calibrated classifier per model: will it get this question right?"""
-
-    models: list[str]
-    classifiers: dict[str, object]
-    extractor: FeatureExtractor
-
-    @classmethod
-    def train(
-        cls,
-        grid: Grid,
-        texts: dict[tuple[str, str], str],
-        extractor: FeatureExtractor | None = None,
-        seed: int = DEFAULT_SEED,
-    ) -> SuccessPredictor:
-        from sklearn.linear_model import LogisticRegression
-
-        extractor = extractor or FeatureExtractor()
-        question_texts = [texts.get(key, "") for key in grid.correct.index]
-
-        # Fit on the TRAINING questions only. Fitting the vocabulary on the
-        # test set too would leak information about held-out questions.
-        scaled = extractor.fit(question_texts).transform(question_texts)
-
-        classifiers: dict[str, object] = {}
-        for model in grid.models:
-            labels = (grid.correct[model] > CORRECT_THRESHOLD).to_numpy().astype(int)
-
-            if labels.min() == labels.max():
-                classifiers[model] = _ConstantPredictor(labels.mean())
-                logger.info(
-                    "%s was %s on every training question; using a constant.",
-                    model,
-                    "correct" if labels[0] else "wrong",
-                )
-                continue
-
-            # `balanced` matters: a model right 90% of the time would otherwise
-            # be best served by a classifier that always predicts "correct",
-            # which carries no information about which 10% it fails.
-            classifiers[model] = LogisticRegression(
-                max_iter=2000, class_weight="balanced", random_state=seed
-            ).fit(scaled, labels)
-
-        return cls(list(grid.models), classifiers, extractor)
-
-    def predict(self, texts: list[str]) -> pd.DataFrame:
-        """P(correct) for every model, one row per text."""
-        scaled = self.extractor.transform(texts)
-        return pd.DataFrame(
-            {
-                model: self.classifiers[model].predict_proba(scaled)[:, 1]
-                for model in self.models
-            },
-            index=range(len(texts)),
-        )
-
-    def predict_one(self, text: str) -> dict[str, float]:
-        scaled = self.extractor.transform_one(text)
-        return {
-            model: float(self.classifiers[model].predict_proba(scaled)[0, 1])
-            for model in self.models
-        }
-
-    def predict_batch(self, texts: list[str]) -> list[dict[str, float]]:
-        """Probabilities for many texts in one pass.
-
-        Routing one question at a time means one tiny sklearn call per model
-        per question - tens of thousands of calls whose Python overhead dwarfs
-        the arithmetic. Batching is what makes a threshold sweep quick.
-        """
-        frame = self.predict(texts)
-        return frame.to_dict("records")
+    question_texts = [texts.get(key, "") for key in grid.correct.index]
+    labels = {
+        model: (grid.correct[model] > CORRECT_THRESHOLD).to_numpy().astype(int)
+        for model in grid.models
+    }
+    return SuccessPredictor.fit(question_texts, labels, extractor, seed=seed)
 
 
 class LearnedRouter(RoutingStrategy):
@@ -231,7 +171,7 @@ def build_router(
     extractor: FeatureExtractor | None = None,
     seed: int = DEFAULT_SEED,
 ) -> tuple[LearnedRouter, SuccessPredictor]:
-    predictor = SuccessPredictor.train(train_grid, texts, extractor, seed=seed)
+    predictor = train_from_grid(train_grid, texts, extractor, seed=seed)
     router = LearnedRouter(predictor, train_grid.mean_cost_per_model(), threshold)
     return router, predictor
 

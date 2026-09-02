@@ -27,7 +27,13 @@ from pathlib import Path
 from typing import Any
 
 #: Bumped when the artifact layout changes in a way older code cannot read.
-ARTIFACT_VERSION = 1
+#
+# v2: the predictor and feature extractor moved from `eval.benchmarks.*`
+# into `switchboard.routing.*`. A pickle records the module a class came
+# from, and `eval/` is not in the Docker image - so every v1 artifact was
+# unloadable in a container, silently, with routing switching itself off.
+# Bumping the version turns that into 'retrain it' instead of a mystery.
+ARTIFACT_VERSION = 2
 
 
 class ArtifactError(RuntimeError):
@@ -43,6 +49,12 @@ class RouterMetadata:
     source: str = ""
     benchmark: str = ""
     features: str = ""
+    #: "benchmark" or "live traffic". A router trained on recorded feedback
+    #: from real users is a different thing from one trained on exam questions,
+    #: and anyone reading a routing decision needs to know which they have.
+    label_source: str = "benchmark"
+    #: For live-trained routers: the span of traffic it learned from.
+    period: str = ""
     #: Benchmark model names the router can choose between.
     models: list[str] = field(default_factory=list)
     n_train_questions: int = 0
@@ -50,9 +62,11 @@ class RouterMetadata:
 
     def describe(self) -> str:
         where = f"{self.source}/{self.benchmark}" if self.benchmark else self.source
+        noun = "requests" if self.label_source == "live traffic" else "questions"
+        span = f" {self.period}" if self.period else ""
         return (
-            f"trained {self.trained_at[:10]} on {where} "
-            f"({self.n_train_questions:,} questions, {len(self.models)} models, "
+            f"trained {self.trained_at[:10]} on {where}{span} "
+            f"({self.n_train_questions:,} {noun}, {len(self.models)} models, "
             f"{self.features} features)"
         )
 

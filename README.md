@@ -35,6 +35,7 @@ subject to per-request latency, cost and quality limits. What works today:
 - A usage policy that flags personal requests and reports its own error rate
 - Native Anthropic and Gemini adapters, plus model discovery from any provider
 - A public landing page served by the app itself, deployable in one step
+- Train the router on YOUR traffic, from ratings your application sends back
 
 | Phase | | |
 |---|---|---|
@@ -46,6 +47,7 @@ subject to per-request latency, cost and quality limits. What works today:
 | F | Guardrails, docs, write-up | done |
 | G | Universal providers: native Anthropic + Gemini, model discovery | done |
 | H | Public landing page and one-step deployment | done |
+| I | Feedback endpoint and training on your own traffic | done |
 
 **Documentation:** [Architecture](docs/ARCHITECTURE.md) - how it is put
 together and what happens to one request. [Results](docs/RESULTS.md) -
@@ -907,6 +909,97 @@ created by an administrator with `switchboard users add`. Web accounts mean
 passwords, sessions, email verification and account recovery — a real security
 surface that deserves its own phase rather than being tacked onto a landing
 page.
+
+## Training the router on your own traffic
+
+The honest limitation above says a benchmark-trained router goes blank on short
+chat prompts. This is the fix, and it is the loop shadow mode was built to feed.
+
+```powershell
+python -m switchboard router data         # can I train yet, and if not why not
+python -m switchboard router train-live   # train from my own ledger
+```
+
+### The missing half was a label
+
+Training needs pairs of *(question, did this model get it right)*. A benchmark
+ships with an answer key, so the second half is free. **Real traffic has no
+answer key** — nobody wrote down the correct response to "why is this test
+flaky". Without that, the ledger has thousands of questions and no outcomes,
+and no amount of collecting improves anything.
+
+So every response now carries a handle, and your application sends back a
+verdict:
+
+```
+POST /v1/chat/completions
+  -> 200, X-Switchboard-Request-Id: kJ8fQ2vXn4TbLm9wRzA1cQ
+
+POST /v1/feedback
+  {"request_id": "kJ8fQ2vXn4TbLm9wRzA1cQ", "rating": "bad", "note": "wrong API"}
+```
+
+In practice that is what a thumbs up/down in your UI calls. Ratings are scoped
+to the caller's own requests: they become training data, so being able to rate
+someone else's traffic is being able to steer their router.
+
+**No label is ever invented.** It would be easy to guess — "the user asked
+again thirty seconds later, so the first answer was probably bad." It is
+cheap, it is clever, and it is wrong often enough to matter. A wrong label does
+not raise an error; it quietly teaches the router something false and every
+decision afterwards is built on it. Same rule as refusing to guess a model's
+price: a made-up label is worse than no label.
+
+### It refuses to train on too little
+
+```
+Not enough rated traffic to train a router.
+  - Only 1 model(s) have enough rated traffic; 2 are needed.
+    qwen2.5:7b needs 12 more rated requests
+```
+
+| Gate | Why |
+|---|---|
+| prompt storage must be on | otherwise there is no question to learn from |
+| 30 rated requests per model | below this a classifier fits noise, then routes real traffic on it |
+| 5 of **each** verdict per model | 40 ratings that all say "good" produce a classifier that answers yes to everything and wins every decision |
+| 2 models must clear both | a router with one choice is not a router |
+
+`--force` overrides all of it. It exists for inspecting a result, not for
+serving traffic with one, and it says so when you use it.
+
+### Why live data is shaped differently
+
+Benchmark data is **dense** — every question answered by every model. Live
+traffic is **sparse** — each request was answered by exactly one model, and
+what the others would have said is unknown.
+
+That suits this design, because there was never one model comparing all the
+options: there is one classifier per model, each learning "will I get this kind
+of question right?" from the requests it personally handled. The one thing that
+must not happen is flattening sparse data into the dense shape, which would
+write a zero wherever a model was not asked and teach every classifier that
+every question somebody else handled was one it got wrong.
+
+Held-out requests are split **by distinct prompt**, not by row, so the same
+question asked twice cannot land in both halves and turn the AUC into a measure
+of memory.
+
+### A bug this found
+
+While building it: a trained router pickles a reference to the module its
+classes came from. Those classes lived in `eval/`, and the Docker image
+deliberately does not copy `eval/` — it is 500 MB of research tooling a server
+never runs.
+
+So **inside a container, no trained router could load at all.** The failure was
+caught safely, routing switched itself off, and `/health` reported "no router
+artifact loaded" with nothing pointing at the cause. Anyone who deployed with a
+trained router was running without routing and had no way to find out.
+
+The classes now live in `switchboard/routing/`, the artifact version went from
+1 to 2 so an old file says "retrain it" rather than failing mysteriously, and a
+test asserts that everything a trained artifact refers to ships with the server.
 
 ## Licence
 

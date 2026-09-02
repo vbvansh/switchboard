@@ -1,6 +1,9 @@
 from switchboard.ledger.db import Database
 from switchboard.ledger.models import Base, RequestLog, User, utcnow
 from switchboard.ledger.service import (
+    FEEDBACK_BAD,
+    FEEDBACK_GOOD,
+    FEEDBACK_VALUES,
     SERVED_STATUSES,
     STATUS_BLOCKED_BUDGET,
     STATUS_BLOCKED_POLICY,
@@ -13,10 +16,14 @@ from switchboard.ledger.service import (
     LedgerError,
     LedgerService,
     NewUser,
+    UnknownRequest,
     UsageRow,
 )
 
 __all__ = [
+    "FEEDBACK_BAD",
+    "FEEDBACK_GOOD",
+    "FEEDBACK_VALUES",
     "STATUS_BLOCKED_BUDGET",
     "STATUS_BLOCKED_POLICY",
     "STATUS_CACHED",
@@ -32,6 +39,7 @@ __all__ = [
     "LedgerService",
     "NewUser",
     "RequestLog",
+    "UnknownRequest",
     "UsageRow",
     "User",
     "utcnow",

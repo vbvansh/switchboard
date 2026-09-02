@@ -29,8 +29,9 @@ import numpy as np
 import pandas as pd
 
 from eval.benchmarks.features import FeatureExtractor
-from eval.benchmarks.learned import CORRECT_THRESHOLD, DEFAULT_SEED, _ConstantPredictor
+from eval.benchmarks.learned import CORRECT_THRESHOLD, DEFAULT_SEED
 from eval.benchmarks.schema import Grid
+from switchboard.routing.predictor import ConstantPredictor
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,7 @@ class VerifierCascade:
 
         labels = (grid.correct[first] > CORRECT_THRESHOLD).to_numpy().astype(int)
         if labels.min() == labels.max():
-            classifier = _ConstantPredictor(labels.mean())
+            classifier = ConstantPredictor(labels.mean())
             logger.info(
                 "Cheap model %s was uniform on training; using a constant.", first
             )

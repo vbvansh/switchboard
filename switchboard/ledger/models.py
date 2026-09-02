@@ -8,6 +8,7 @@ only source of "now".
 
 from __future__ import annotations
 
+import secrets
 from datetime import UTC, datetime
 
 from sqlalchemy import (
@@ -25,6 +26,18 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 def utcnow() -> datetime:
     """Naive UTC. The single source of time for the ledger."""
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def new_public_id() -> str:
+    """A random, unguessable handle for one request.
+
+    Handed to the client in a response header so it can send feedback back
+    later. Random rather than the row number for two reasons: a sequential id
+    would tell anyone who saw one how many requests this instance has served,
+    and feedback is checked against the caller who made the request, so an id
+    that can be guessed by counting invites people to try.
+    """
+    return secrets.token_urlsafe(16)[:22]
 
 
 class Base(DeclarativeBase):
@@ -67,6 +80,10 @@ class RequestLog(Base):
     __tablename__ = "requests"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # The handle the outside world uses. See new_public_id().
+    public_id: Mapped[str | None] = mapped_column(
+        String(32), default=new_public_id, unique=True, index=True, nullable=True
+    )
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
@@ -125,6 +142,21 @@ class RequestLog(Base):
     # allowed | flagged | blocked | overridden
     guardrail_action: Mapped[str | None] = mapped_column(String(16), nullable=True)
     guardrail_rules: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # --- Was the answer any good? ------------------------------------------
+    # "good" | "bad", sent by the application through POST /v1/feedback.
+    #
+    # THE COLUMN THE ROUTER HAS BEEN MISSING. A benchmark ships with an answer
+    # key; real traffic does not, so without this there is nothing to learn
+    # from and a router can never improve on your own workload.
+    #
+    # NULL means nobody rated it, which is a different fact from "it was bad".
+    # Training counts only rated rows, so the blank stays a blank.
+    feedback: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, index=True
+    )
+    feedback_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    feedback_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # --- Outcome -----------------------------------------------------------
     # ok | blocked_budget | blocked_policy | provider_error | client_error

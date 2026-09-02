@@ -36,6 +36,7 @@ from switchboard.guardrails import (
     prompt_text,
 )
 from switchboard.ledger import (
+    FEEDBACK_VALUES,
     STATUS_BLOCKED_BUDGET,
     STATUS_BLOCKED_POLICY,
     STATUS_CACHED,
@@ -45,9 +46,11 @@ from switchboard.ledger import (
     BudgetExceededError,
     Database,
     LedgerService,
+    UnknownRequest,
     User,
 )
 from switchboard.ledger.keys import extract_bearer_token
+from switchboard.ledger.models import new_public_id
 from switchboard.ledger.service import estimate_tokens
 from switchboard.providers import Provider, ProviderPool, ProviderUnavailable
 from switchboard.providers.breaker import CircuitBreaker
@@ -116,6 +119,12 @@ app = FastAPI(
     version="0.3.0",
     lifespan=lifespan,
 )
+
+
+#: Handed back on every served request so the application can rate it later.
+#: That rating is the label the router needs to learn from real traffic -
+#: see switchboard/training.py.
+REQUEST_ID_HEADER = "X-Switchboard-Request-Id"
 
 
 # --- Small helpers ---------------------------------------------------------
@@ -369,6 +378,74 @@ async def health(request: Request) -> dict[str, Any]:
     }
 
 
+@app.post("/v1/feedback")
+async def feedback(request: Request) -> Response:
+    """Say whether an answer was any good.
+
+    THE MISSING HALF OF ROUTING. A benchmark comes with an answer key, so
+    training on one is free. Real traffic has no answer key - nobody wrote down
+    the correct response to "why is this test flaky" - so without somebody
+    saying, there is nothing to learn from and a router never improves on your
+    own workload no matter how long it runs.
+
+        POST /v1/feedback
+        {"request_id": "<X-Switchboard-Request-Id>", "rating": "good"|"bad"}
+
+    In practice this is what a thumbs up/down in your application calls.
+
+    Scoped to the caller's own requests. Without that, anyone holding a valid
+    API key could rate anyone else's traffic - and since ratings become
+    training data, that is a way to steer another team's router.
+    """
+    try:
+        payload: dict[str, Any] = await request.json()
+    except ValueError:
+        return _error(400, "Request body must be valid JSON.", "invalid_request_error")
+
+    try:
+        user = _identify(request)
+    except AuthenticationError as exc:
+        return _error(401, str(exc), "authentication_error")
+
+    request_id = payload.get("request_id") or payload.get("id")
+    rating = payload.get("rating")
+
+    if not isinstance(request_id, str) or not request_id:
+        return _error(
+            400,
+            "request_id is required. It is returned on every response as the "
+            f"{REQUEST_ID_HEADER} header.",
+            "invalid_request_error",
+        )
+    if rating not in FEEDBACK_VALUES:
+        return _error(
+            400,
+            f"rating must be one of {', '.join(FEEDBACK_VALUES)}.",
+            "invalid_request_error",
+        )
+
+    ledger: LedgerService = request.app.state.ledger
+    try:
+        entry = ledger.record_feedback(
+            user_id=user.id,
+            public_id=request_id,
+            rating=str(rating),
+            note=payload.get("note"),
+        )
+    except UnknownRequest:
+        # Deliberately the same answer whether the id never existed or belongs
+        # to somebody else. Distinguishing them would turn this endpoint into a
+        # way to discover other people's request ids.
+        return _error(404, "No such request.", "not_found")
+
+    request.app.state.metrics.increment(
+        metrics_mod.FEEDBACK, rating=str(rating), model=entry.served_model
+    )
+    return JSONResponse(
+        {"request_id": request_id, "rating": rating, "model": entry.served_model}
+    )
+
+
 @app.get("/v1/models")
 async def list_models(request: Request) -> Response:
     """Every model this Switchboard can actually serve, OpenAI-shaped.
@@ -449,6 +526,13 @@ async def chat_completions(request: Request) -> Response:
     served_model, routing_reason, shadow = _resolve_model(request, payload)
     messages = payload.get("messages")
 
+    # Minted BEFORE the request is served, not when the row is written.
+    # A streamed response sends its headers immediately and its ledger row
+    # only when the stream ends, so an id generated at write time could
+    # never reach the client that needs it to send feedback.
+    public_id = new_public_id()
+    request_headers = {REQUEST_ID_HEADER: public_id}
+
     # The usage policy reads the prompt in memory and keeps only its verdict.
     # Nothing here writes prompt text anywhere: that stays behind
     # settings.store_prompts, off by default, exactly as before.
@@ -505,6 +589,7 @@ async def chat_completions(request: Request) -> Response:
             routing_reason=routing_reason,
             **shadow_fields(),
             **policy_fields,
+            public_id=public_id,
             **kwargs,
         )
 
@@ -562,12 +647,13 @@ async def chat_completions(request: Request) -> Response:
                 routing_reason=routing_reason,
                 **shadow_fields(hit.prompt_tokens, hit.completion_tokens),
                 **policy_fields,
+                public_id=public_id,
             )
             return Response(
                 content=hit.body,
                 status_code=hit.status_code,
                 media_type="application/json",
-                headers={"X-Switchboard-Cache": "hit"},
+                headers={"X-Switchboard-Cache": "hit", **request_headers},
             )
         metrics.increment(metrics_mod.CACHE_EVENTS, event="miss")
     elif not payload.get("stream"):
@@ -587,6 +673,7 @@ async def chat_completions(request: Request) -> Response:
             routing_reason=routing_reason,
             shadow_fields=shadow_fields,
             policy_fields=policy_fields,
+            public_id=public_id,
         )
 
     upstream, provider, failure = await _call_with_failover(
@@ -623,6 +710,7 @@ async def chat_completions(request: Request) -> Response:
         routing_reason=routing_reason,
         **shadow_fields(prompt_tokens, completion_tokens),
         **policy_fields,
+        public_id=public_id,
     )
 
     metrics.increment(
@@ -650,7 +738,10 @@ async def chat_completions(request: Request) -> Response:
         content=upstream.content,
         status_code=upstream.status_code,
         media_type="application/json",
-        headers={"X-Switchboard-Cache": "miss" if key is not None else "skip"},
+        headers={
+            "X-Switchboard-Cache": "miss" if key is not None else "skip",
+            **request_headers,
+        },
     )
 
 
@@ -709,6 +800,7 @@ async def _serve_streaming(
     routing_reason: str | None = None,
     shadow_fields=None,
     policy_fields: dict[str, Any] | None = None,
+    public_id: str | None = None,
 ) -> Response:
     """Stream the answer through untouched, accounting for it as it passes."""
     stream = provider.stream_chat_completion(payload)
@@ -731,6 +823,7 @@ async def _serve_streaming(
             messages=messages,
             routing_reason=routing_reason,
             **(policy_fields or {}),
+            public_id=public_id,
         )
         return _error(503, str(exc), "provider_unavailable")
     except StopAsyncIteration:
@@ -774,6 +867,11 @@ async def _serve_streaming(
                     else {}
                 ),
                 **(policy_fields or {}),
+                public_id=public_id,
             )
 
-    return StreamingResponse(body(), media_type="text/event-stream")
+    return StreamingResponse(
+        body(),
+        media_type="text/event-stream",
+        headers={REQUEST_ID_HEADER: public_id} if public_id else None,
+    )

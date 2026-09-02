@@ -15,7 +15,7 @@ from eval.benchmarks.constraints import (
     latency_report,
 )
 from eval.benchmarks.features import FeatureExtractor
-from eval.benchmarks.learned import SuccessPredictor
+from eval.benchmarks.learned import train_from_grid
 from eval.benchmarks.schema import Grid
 from switchboard.routing import RoutingContext
 from tests.test_cascade import rows_with_answers
@@ -138,7 +138,7 @@ def trained_setup():
         )
         records.append(("b", f"q{i:02d}", "slow", 1.0, 1.00, 9.0, 50, "b"))
     grid = make_grid(*records)
-    predictor = SuccessPredictor.train(grid, texts, FeatureExtractor(mode="surface"))
+    predictor = train_from_grid(grid, texts, FeatureExtractor(mode="surface"))
     return predictor, ModelProfile.from_grid(grid), grid, texts
 
 

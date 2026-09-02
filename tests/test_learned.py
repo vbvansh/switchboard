@@ -18,11 +18,11 @@ from eval.benchmarks.features import (
     surface_features,
 )
 from eval.benchmarks.learned import (
+    ConstantPredictor,
     LearnedRouter,
-    SuccessPredictor,
-    _ConstantPredictor,
     routers_for_thresholds,
     split_questions,
+    train_from_grid,
     training_report,
 )
 from eval.benchmarks.schema import Grid
@@ -184,7 +184,7 @@ def test_subset_grids_are_disjoint_and_complete() -> None:
 
 def test_constant_predictor_returns_its_probability() -> None:
     """Stands in when a model was right, or wrong, on every training question."""
-    probabilities = _ConstantPredictor(0.8).predict_proba(np.zeros((3, 5)))
+    probabilities = ConstantPredictor(0.8).predict_proba(np.zeros((3, 5)))
     assert probabilities.shape == (3, 2)
     assert probabilities[:, 1].tolist() == [0.8, 0.8, 0.8]
 
@@ -209,7 +209,7 @@ def trained():
         records.append(("b", f"q{i:03d}", "big", 1.0, 1.00, 2.0))
 
     grid = BenchmarkFrame(validate(rows(*records)), "test").grid()
-    predictor = SuccessPredictor.train(
+    predictor = train_from_grid(
         grid, texts, FeatureExtractor(mode="surface")
     )
     return predictor, grid, texts
@@ -238,7 +238,7 @@ def test_predictor_learns_a_real_signal(trained) -> None:
 def test_a_model_that_never_fails_gets_a_constant(trained) -> None:
     """`big` is right on everything, so logistic regression cannot fit it."""
     predictor, _, _ = trained
-    assert isinstance(predictor.classifiers["big"], _ConstantPredictor)
+    assert isinstance(predictor.classifiers["big"], ConstantPredictor)
 
 
 def test_training_report_scores_each_model(trained) -> None:

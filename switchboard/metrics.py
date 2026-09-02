@@ -155,6 +155,7 @@ PROVIDER_ATTEMPTS = "switchboard_provider_attempts_total"
 FAILOVERS = "switchboard_failovers_total"
 RATE_LIMITED = "switchboard_rate_limited_total"
 POLICY_EVENTS = "switchboard_policy_events_total"
+FEEDBACK = "switchboard_feedback_total"
 TOKENS = "switchboard_tokens_total"
 COST = "switchboard_simulated_cost_usd_total"
 
@@ -171,6 +172,11 @@ def build_registry() -> Metrics:
         POLICY_EVENTS,
         "Usage policy verdicts, by category and action. Labels are drawn "
         "from the fixed rule set, never from caller text.",
+    )
+    metrics.describe(
+        FEEDBACK,
+        "Answer ratings from applications, by verdict and model. This is "
+        "the training signal for a live-trained router.",
     )
     metrics.describe(TOKENS, "Tokens processed, by direction.")
     metrics.describe(COST, "Simulated spend. NOT real money - see the README.")

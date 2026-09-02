@@ -187,6 +187,13 @@ offline table.
 serve. Shadow mode collects exactly that, with the router's opinion attached and
 nothing at risk.
 
+**That fix now exists** — `switchboard router train-live`, fed by ratings your
+application sends to `POST /v1/feedback`. What is NOT here is a measurement of
+it. Nobody has run Switchboard on real traffic for long enough to train one, so
+there is no held-out AUC to report and no before/after comparison. The mechanism
+is built and tested; its effect is unmeasured, and this document will say so
+until somebody measures it.
+
 ---
 
 ## 7. The usage policy, and how often it is wrong
@@ -241,6 +248,10 @@ Stated plainly, because a results document that only lists wins is marketing.
 - **No human evaluation.** Correctness comes from the benchmark answer keys.
   There is no LLM judge anywhere in this project, deliberately: grading with a
   model would make the results depend on a model.
+- **No router has yet been trained on real traffic.** The pipeline is built,
+  gated and tested end to end, but every routing number in this document still
+  comes from public benchmarks. Whether training on live traffic actually fixes
+  the short-prompt failure in section 6 is untested.
 - **The Anthropic and Gemini adapters have never been run against a live API.**
   They are written to the published specifications and covered by tests using
   recorded response shapes, which proves the translation matches the documented
