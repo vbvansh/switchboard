@@ -41,9 +41,11 @@ COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
 COPY --chown=switchboard:switchboard switchboard/ ./switchboard/
-COPY --chown=switchboard:switchboard migrations/ ./migrations/
 COPY --chown=switchboard:switchboard docker/entrypoint.sh ./docker/entrypoint.sh
-COPY --chown=switchboard:switchboard alembic.ini providers.yaml pyproject.toml \
+# alembic.ini and migrations/ are no longer copied separately: they now live
+# inside switchboard/, copied above. They have to, so that a pip-installed copy
+# can migrate its own database wherever pip put it.
+COPY --chown=switchboard:switchboard providers.yaml pyproject.toml \
      guardrails.example.yaml LICENSE NOTICE README.md ./
 
 # The default SQLite database lives here. Mount a volume over it to keep the

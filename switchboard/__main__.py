@@ -149,6 +149,59 @@ def _catalog() -> ModelCatalog:
 
 
 @cli.command()
+def where() -> None:
+    """Show where Switchboard keeps its files on this machine.
+
+    Worth its own command because the answer differs between a git checkout and
+    a pip install, and "my users disappeared" is almost always this: the server
+    was started from a different directory and quietly used a different
+    database.
+    """
+    from switchboard import paths
+
+    table = Table(title="Switchboard file locations")
+    table.add_column("What")
+    table.add_column("Where")
+
+    layout = paths.describe()
+    table.add_row("Layout", layout["layout"])
+    table.add_row("Config directory", layout["config_dir"])
+    table.add_row("Data directory", layout["data_dir"])
+    table.add_row("Provider catalog", layout["providers_file"])
+    table.add_row("Ledger (default)", layout["database"])
+    table.add_row("Ledger (in use)", settings.database_url)
+    table.add_row("Router artifact", settings.router_path)
+    console.print(table)
+
+    if layout["layout"] == "bundled":
+        console.print(
+            "[dim]A providers.yaml sits next to the package, so this is a "
+            "checkout or the Docker image and everything stays here. An "
+            "installed copy uses your operating system's config and data "
+            "directories instead.[/dim]"
+        )
+
+    missing = [
+        name
+        for name, path in (
+            ("provider catalog", paths.providers_file()),
+        )
+        if not Path(path).exists()
+    ]
+    if missing:
+        console.print(
+            f"[yellow]No {', '.join(missing)} found.[/yellow] "
+            "Copy providers.yaml from the repository, or point "
+            "SWITCHBOARD_PROVIDERS_FILE at one."
+        )
+
+    console.print(
+        "[dim]Override everything with SWITCHBOARD_HOME, or individually with "
+        "SWITCHBOARD_PROVIDERS_FILE and SWITCHBOARD_DATABASE_URL.[/dim]"
+    )
+
+
+@cli.command()
 def providers() -> None:
     """Show configured providers and the models they offer."""
     catalog = _catalog()
@@ -1044,6 +1097,199 @@ def bench_headroom(
         f"questions routing could win: [green]{grid.routable_fraction():.1%}[/green]"
         f"  (no model solves {1 - grid.solvable_fraction():.1%})"
     )
+
+
+@bench_cli.command("difficulty")
+def bench_difficulty(
+    source: str = typer.Argument("all", help="A source, or `all` for every one."),
+    holdout: int = typer.Option(5, help="Whole suites held back for testing."),
+    features: str = typer.Option("tfidf", help="surface | tfidf | embedding."),
+    min_models: int = typer.Option(
+        3, help="Models that must have attempted a question to score it."
+    ),
+    max_train: int = typer.Option(60000, help="Cap on training questions."),
+    seed: int = typer.Option(0, help="Seed for choosing the held-out suites."),
+    out: str = typer.Option("", help="Write the report as CSV."),
+) -> None:
+    """Is a question's difficulty predictable from its text alone?
+
+    This is the experiment behind the cold-start router. Difficulty is a
+    property of the QUESTION, not of any model - so if it can be predicted from
+    text, it can be measured once here and shipped to every user, and routing
+    works on request number one instead of after a month of collecting traffic.
+
+    The test deliberately holds back WHOLE SUITES. Splitting questions at
+    random would leave GPQA items in both halves, and a model that has seen
+    GPQA can pattern-match GPQA. Holding back entire suites asks the question
+    that matters: does this transfer to a kind of question never seen before?
+
+    Everything is scored against always guessing the average difficulty. A
+    result that cannot beat that constant carries no signal, however good its
+    correlation looks.
+    """
+    _require_eval()
+    from eval import benchmarks
+    from eval.benchmarks import difficulty as difficulty_mod
+
+    sources = list(benchmarks.SOURCES) if source == "all" else [source]
+
+    frames = []
+    for name in sources:
+        if not benchmarks.is_cached(name):
+            console.print(
+                f"[yellow]{name} is not cached; skipping.[/yellow] "
+                f"Build it with: switchboard bench build {name}"
+            )
+            continue
+        console.print(f"Loading [cyan]{name}[/cyan] ...")
+        loaded = benchmarks.load(name)
+        queries = benchmarks.load_queries(name)
+
+        questions = difficulty_mod.per_question(loaded.frame, min_models=min_models)
+        questions = difficulty_mod.attach_text(questions, queries)
+        # Suites can share a name across sources; qualify them so holding one
+        # out actually holds out one thing.
+        questions["benchmark"] = name + "/" + questions["benchmark"].astype(str)
+        frames.append(questions)
+
+    if not frames:
+        console.print("[red]No cached sources. Run: switchboard bench build all[/red]")
+        raise typer.Exit(code=1)
+
+    import pandas as pd
+
+    questions = pd.concat(frames, ignore_index=True)
+
+    console.print(
+        f"[green]{len(questions):,}[/green] questions with a difficulty score, "
+        f"across [green]{questions['benchmark'].nunique()}[/green] suites "
+        f"(each attempted by at least {min_models} models)."
+    )
+
+    spread = Table(title="How hard are the questions?")
+    spread.add_column("Difficulty")
+    spread.add_column("Questions", justify="right")
+    spread.add_column("Meaning")
+    bands = [
+        ("0.00 - 0.20", 0.0, 0.2, "almost every model got it right"),
+        ("0.20 - 0.40", 0.2, 0.4, "easy"),
+        ("0.40 - 0.60", 0.4, 0.6, "models disagree - where routing pays"),
+        ("0.60 - 0.80", 0.6, 0.8, "hard"),
+        ("0.80 - 1.00", 0.8, 1.01, "almost nothing gets it right"),
+    ]
+    for label, low, high, meaning in bands:
+        count = int(
+            ((questions["difficulty"] >= low) & (questions["difficulty"] < high)).sum()
+        )
+        share = 100.0 * count / len(questions)
+        spread.add_row(label, f"{count:,} ({share:.0f}%)", meaning)
+    console.print(spread)
+
+    console.print(
+        "\nTraining a text -> difficulty model, holding back "
+        f"[cyan]{holdout}[/cyan] whole suites ..."
+    )
+    report = difficulty_mod.run(
+        questions,
+        holdout=holdout,
+        features=features,
+        seed=seed,
+        max_train=max_train,
+    )
+
+    console.print(f"[dim]Held out: {', '.join(report.held_out_suites)}[/dim]")
+    console.print(f"[dim]Features: {report.features}[/dim]\n")
+
+    headline = Table(title="On suites it has NEVER seen")
+    headline.add_column("Measure")
+    headline.add_column("Value", justify="right")
+    headline.add_column("What it means")
+    overall = report.overall
+    headline.add_row(
+        "Rank correlation", f"{overall.spearman:.3f}", "1.0 perfect, 0.0 useless"
+    )
+    headline.add_row(
+        "Average error", f"{overall.mae:.3f}", "how far off, on a 0-1 scale"
+    )
+    headline.add_row(
+        "Error if we just guessed the average",
+        f"{overall.baseline_mae:.3f}",
+        "the bar to beat",
+    )
+    colour = "green" if overall.beats_baseline else "red"
+    headline.add_row(
+        "Improvement over guessing",
+        f"[{colour}]{overall.improvement_pct:+.1f}%[/{colour}]",
+        "negative means worse than doing nothing",
+    )
+    console.print(headline)
+
+    if report.by_length:
+        lengths = Table(title="By prompt length - where does it hold up?")
+        lengths.add_column("Length")
+        lengths.add_column("Questions", justify="right")
+        lengths.add_column("Correlation", justify="right")
+        lengths.add_column("Beats guessing?")
+        for name, score in report.by_length.items():
+            mark = (
+                f"[green]yes, {score.improvement_pct:+.0f}%[/green]"
+                if score.beats_baseline
+                else "[red]no[/red]"
+            )
+            lengths.add_row(name, f"{score.n:,}", f"{score.spearman:.3f}", mark)
+        console.print(lengths)
+        console.print(
+            "[dim]This is the table that answers 'does it work on short "
+            "prompts as well as long ones'. A weak row is not a failure - it "
+            "is where the router should say it does not know.[/dim]"
+        )
+
+    if report.by_suite:
+        suites = Table(title="By held-out suite")
+        suites.add_column("Suite")
+        suites.add_column("Questions", justify="right")
+        suites.add_column("Correlation", justify="right")
+        suites.add_column("Beats guessing?")
+        for name, score in sorted(
+            report.by_suite.items(), key=lambda kv: -(kv[1].spearman or 0)
+        ):
+            mark = (
+                f"[green]yes, {score.improvement_pct:+.0f}%[/green]"
+                if score.beats_baseline
+                else "[red]no[/red]"
+            )
+            suites.add_row(name, f"{score.n:,}", f"{score.spearman:.3f}", mark)
+        console.print(suites)
+
+    console.print(f"\n[bold]{report.verdict()}[/bold]")
+
+    if out:
+        import pandas as pd
+
+        rows = [
+            {
+                "slice": "overall",
+                "kind": "overall",
+                "n": overall.n,
+                "spearman": overall.spearman,
+                "mae": overall.mae,
+                "baseline_mae": overall.baseline_mae,
+            }
+        ]
+        for kind, scores in (("length", report.by_length), ("suite", report.by_suite)):
+            for name, score in scores.items():
+                rows.append(
+                    {
+                        "slice": name,
+                        "kind": kind,
+                        "n": score.n,
+                        "spearman": score.spearman,
+                        "mae": score.mae,
+                        "baseline_mae": score.baseline_mae,
+                    }
+                )
+        pd.DataFrame(rows).to_csv(out, index=False)
+        console.print(f"[green]Written[/green] {out}")
 
 
 @bench_cli.command("replay")

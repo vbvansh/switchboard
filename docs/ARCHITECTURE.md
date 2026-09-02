@@ -114,6 +114,20 @@ Streaming is a genuine pass-through. The bytes go straight to the client while a
 sniffer reads the token usage out of the stream as it passes, so accounting
 happens without buffering the answer or delaying the first token.
 
+### `paths.py` — where files live
+
+Answers one question — "where does X go?" — so nothing else computes a path for
+itself.
+
+Two layouts, detected by whether a `providers.yaml` sits beside the package: a
+checkout or the Docker image keeps everything where it is, an installed copy
+uses the operating system's config and data directories. Writing into
+`site-packages` would be unwritable for many users and wiped on upgrade.
+
+The bug it fixed was quiet: the database default was a *relative* path, so
+running the server from two directories used two databases and silently created
+the second one.
+
 ### `catalog.py` — what models exist
 
 Reads `providers.yaml`. Every model has a provider, a price per million tokens

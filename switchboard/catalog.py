@@ -17,12 +17,14 @@ from pathlib import Path
 
 import yaml
 
+from switchboard import paths
+
 logger = logging.getLogger(__name__)
 
 TOKENS_PER_PRICE_UNIT = 1_000_000
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CATALOG_PATH = PROJECT_ROOT / "providers.yaml"
+PROJECT_ROOT = paths.BUNDLE_ROOT
+DEFAULT_CATALOG_PATH = paths.providers_file()
 
 #: Adapter types this build knows how to talk to.
 #

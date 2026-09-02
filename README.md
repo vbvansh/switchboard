@@ -48,6 +48,7 @@ subject to per-request latency, cost and quality limits. What works today:
 | G | Universal providers: native Anthropic + Gemini, model discovery | done |
 | H | Public landing page and one-step deployment | done |
 | I | Feedback endpoint and training on your own traffic | done |
+| J.1 | Installable as a package, with files in the right places | done |
 
 **Documentation:** [Architecture](docs/ARCHITECTURE.md) - how it is put
 together and what happens to one request. [Results](docs/RESULTS.md) -
@@ -349,6 +350,33 @@ then set `SWITCHBOARD_DATABASE_URL` on the switchboard service to
 
 The ledger lives in a named volume. Without it, replacing the container would
 destroy every user, budget and spending record.
+
+## Where Switchboard keeps its files
+
+```powershell
+python -m switchboard where
+```
+
+Two layouts, detected rather than configured:
+
+| | Config and data go |
+|---|---|
+| **A git checkout, or the Docker image** | beside the package, exactly as before |
+| **A pip install** | your operating system's config and data directories |
+
+The rule is simple: if a `providers.yaml` sits next to the package, that is a
+deliberately laid-out installation and nothing moves. Otherwise it is an
+installed copy, and writing into `site-packages` would be both unwritable and
+wiped on the next upgrade.
+
+Override with `SWITCHBOARD_HOME` for everything, or `SWITCHBOARD_PROVIDERS_FILE`
+and `SWITCHBOARD_DATABASE_URL` individually.
+
+**One bug this fixed.** The database default used to be
+`sqlite:///data/switchboard.db` — a *relative* path, resolved against whatever
+directory you were standing in. Start the server from a different folder and
+every user, budget and spending record appeared to be gone, with no error,
+because SQLite cheerfully creates a fresh empty file. It is now absolute.
 
 ## Run from source
 

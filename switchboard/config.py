@@ -7,11 +7,14 @@ change how the process behaves.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+from switchboard import paths
+
+#: Kept as a name because other modules import it. Prefer `switchboard.paths`
+#: for anything new: this points at the package's parent, which is the repo
+#: root in a checkout and a site-packages directory once installed.
+PROJECT_ROOT = paths.BUNDLE_ROOT
 
 # Model name a client can send to hand model choice to Switchboard.
 AUTO_MODEL = "auto"
@@ -20,13 +23,17 @@ AUTO_MODEL = "auto"
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SWITCHBOARD_",
-        env_file=".env",
+        # A .env beside the working directory still wins, which is what a
+        # developer in a checkout expects. The second path is where an
+        # installed copy keeps it, so `switchboard init` has somewhere to write
+        # that survives an upgrade.
+        env_file=(".env", str(paths.config_dir() / ".env")),
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
     # --- Providers ----------------------------------------------------------
-    providers_file: str = str(PROJECT_ROOT / "providers.yaml")
+    providers_file: str = str(paths.providers_file())
 
     # Model used when a client sends "auto" or omits the field. Until the
     # router lands, this serves every request.
@@ -35,7 +42,7 @@ class Settings(BaseSettings):
     # A trained router artifact. When set and loadable, `model: "auto"`
     # routes; otherwise it falls back to `default_model` and says so in
     # /health. A stale artifact must never take the service down.
-    router_path: str = "data/router.joblib"
+    router_path: str = str(paths.router_path())
 
     # Minimum predicted chance of success before a model is accepted. Raising
     # it escalates more often: more accuracy, more cost. Callers can override
@@ -105,7 +112,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     # --- Ledger -------------------------------------------------------------
-    database_url: str = "sqlite:///data/switchboard.db"
+    database_url: str = paths.default_database_url()
 
     # Store the full `messages` array of every request.
     #

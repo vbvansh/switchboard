@@ -20,9 +20,15 @@ from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-ALEMBIC_INI = PROJECT_ROOT / "alembic.ini"
-MIGRATIONS_DIR = PROJECT_ROOT / "migrations"
+#: Migrations live INSIDE the package, not beside it.
+#
+# They have to. `switchboard db upgrade` runs on the user's machine, and the
+# server refuses to start against a schema it does not recognise - so a copy
+# installed by pip without its migrations could never start at all. Anything
+# the running server needs must ship in the package.
+PACKAGE_DIR = Path(__file__).resolve().parent
+ALEMBIC_INI = PACKAGE_DIR / "alembic.ini"
+MIGRATIONS_DIR = PACKAGE_DIR / "migrations"
 
 
 class SchemaOutOfDate(RuntimeError):
