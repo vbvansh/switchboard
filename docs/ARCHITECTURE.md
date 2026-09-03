@@ -1,414 +1,472 @@
-# How Switchboard is put together
+# How Switchboard works
 
-This document explains the whole system in plain English: what each piece does,
-why it exists, and what happens to one request from the moment it arrives.
+This explains the whole system in plain English: what each piece does, why it
+exists, and what happens to a single request from the moment it arrives.
 
-If you only read one section, read [The request lifecycle](#the-request-lifecycle).
-
----
-
-## The one-sentence version
-
-Switchboard is a proxy that speaks the OpenAI API. Your application points at
-it instead of at OpenAI; Switchboard decides which model should actually answer,
-sends the request there, and writes down what happened.
+No prior knowledge assumed. Every term is explained the first time it appears.
 
 ---
 
-## The shape of the system
+## 1. What it is, in one paragraph
+
+You have an application that talks to an AI model. Switchboard sits in the
+middle. Your application sends its request to Switchboard instead of to the
+model provider; Switchboard decides **which** model should answer, sends it
+there, and writes down what happened.
+
+```mermaid
+flowchart LR
+    APP["Your application"] -->|"one line changed"| SB["Switchboard"]
+    SB --> CHEAP["a cheap model"]
+    SB --> MID["a mid model"]
+    SB --> DEAR["an expensive model"]
+    SB -.->|"writes down<br/>who, what, how much"| DB[("a database")]
+```
+
+The only change in your application is the address it points at:
+
+```python
+# before
+client = OpenAI(api_key="sk-...")
+
+# after — one line
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="sk-switchboard-...")
+```
+
+Everything else — streaming, tools, whatever your library supports — keeps
+working, because Switchboard passes your request through untouched and only ever
+rewrites which model is named in it.
+
+---
+
+## 2. Why bother
+
+Models differ in price by a factor of two hundred. Most questions do not need
+the expensive one — but nobody can tell which, so in practice everything goes to
+the expensive one and the bill is enormous.
+
+Three things make that worth fixing, and only the third is hard:
+
+| | |
+|---|---|
+| **Most requests don't need the best model** | "format this JSON" and "prove this theorem" go to the same place |
+| **Price does not predict quality** | measured: two flagship models score identically while one costs twice as much |
+| **Nobody can tell which is which in advance** | this is the actual problem |
+
+---
+
+## 3. What happens to one request
+
+The order below is deliberate: **every step that can refuse a request happens
+before any model is called**, so a refused request costs nothing.
+
+```mermaid
+sequenceDiagram
+    participant C as Your app
+    participant S as Switchboard
+    participant L as Ledger
+    participant M as A model
+
+    C->>S: POST /v1/chat/completions
+    S->>L: who owns this API key?
+    L-->>S: a user, or 401 Unauthorized
+    S->>S: too many requests this minute? (429)
+    S->>S: which model should answer?
+    S->>S: does this look like work? (403 if blocking)
+    S->>L: is this user within budget? (402)
+    S->>S: seen this exact request before? (cache, costs nothing)
+    S->>M: forward the request
+    M-->>S: an answer
+    S->>S: did the answer obviously fail? escalate if so
+    S->>L: record user, model, tokens, cost, time, reason
+    S-->>C: the answer, unchanged
+```
+
+Written out:
+
+1. **Who is this?** The API key is hashed and looked up. Unknown key → `401`.
+2. **Are they going too fast?** A monthly budget cannot stop a runaway script
+   spending it in ninety seconds; a per-minute limit can. Too fast → `429`.
+3. **Which model?** See section 4.
+4. **Is this work?** The usage policy labels personal-looking requests. By
+   default it labels and serves them; it can be set to refuse with `403`.
+5. **Can they afford it?** Over budget → `402`. Recorded, and charged nothing.
+6. **Have we answered this exact question before?** If so, return the stored
+   answer, recorded as costing **zero**.
+7. **Call the model.** Retry temporary failures, fail over to a backup provider.
+8. **Look at the answer.** See section 5.
+9. **Write it all down**, including what this would have cost on the most
+   expensive model — which is what makes the savings figure checkable.
+
+---
+
+## 4. How a model gets chosen
+
+This is the part that changed most during the project, and the reason is worth
+knowing: **two experiments showed that a prompt cannot reliably be judged before
+it is answered.** (Details in [RESULTS.md](RESULTS.md) sections 6 and 8.)
+
+So there are three ways to choose, and the best available one wins:
+
+```mermaid
+flowchart TD
+    START["a request arrives with model: auto"] --> Q1{"do you have a router<br/>trained on YOUR traffic?"}
+    Q1 -->|yes| OWN["use it<br/>(knows your prompts<br/>and your models)"]
+    Q1 -->|no| Q2{"does the shipped router<br/>know these models?"}
+    Q2 -->|yes| BROAD["use it<br/>(trained on 40 public<br/>benchmark suites)"]
+    Q2 -->|no| LADDER["use the ladder<br/>(cheapest model that fits)"]
+    BROAD --> Q3{"are its predictions<br/>all about the same?"}
+    Q3 -->|"yes — no real opinion"| LADDER
+    Q3 -->|"no — a clear winner"| PICK["cheapest model above<br/>the confidence threshold"]
+```
+
+### Tier 1 — your own router
+
+Trained on your own traffic, from ratings your application sends back. It knows
+your prompts and your exact model names. Best, but it needs traffic first.
+
+### Tier 2 — the shipped router
+
+Trained by us across 40 public benchmark suites and bundled inside the package,
+so a fresh install has one immediately. It learned **which model suits which
+kind of question** — reasoning, code and maths well; commonsense, emotion and
+creative writing not at all. `switchboard router info` prints the full table.
+
+### Tier 3 — the ladder
+
+No prediction at all. It applies only facts:
+
+- the cheapest model on your list, always
+- unless the prompt does not fit that model's context window (a hard limit, not
+  an opinion)
+- unless the caller asked for a cost or speed cap
+
+**It deliberately sends "hi" and "prove this theorem" to the same model.** There
+is a test asserting that, because guessing from wording was measured and found
+to be *worse than useless*: a hand-written keyword rule scored 77.8% on one
+benchmark and 57.9% on another — worse than always using the cheapest model.
+
+### Saying "I don't know"
+
+The tier-2 router does not always have an opinion. When its confidence scores
+for every model come out about the same, it has not distinguished them — and
+acting on that difference would be inventing a decision. So it abstains, hands
+over to the ladder, and says so in the record:
+
+```
+predictions span only 0.021 across 4 models - no usable discrimination
+on this prompt, so no routing decision was made; ladder chose qwen2.5:1.5b
+```
+
+This exists because of a real failure. An earlier router returned 0.67–0.87 for
+*every* model on unfamiliar prompts, sent everything to the cheapest one, and
+wrote a reason implying a judgement had been made. It was not wrong — it was
+**silent about knowing nothing**, which is worse, because nothing in the logs
+said so.
+
+---
+
+## 5. Checking the answer afterwards
+
+Guessing beforehand needs knowledge of the world. **Checking afterwards needs
+only the answer, which is right there.** So the quality judgement happens after
+the call, mechanically and for free.
+
+```mermaid
+flowchart TD
+    CALL["call the cheapest model"] --> CHECK{"look at the answer"}
+    CHECK -->|"empty"| ESC["escalate to the next model up"]
+    CHECK -->|"asked for JSON, got prose"| ESC
+    CHECK -->|"cut off at the token limit"| FLAG["record it — a stronger model<br/>hits the same limit"]
+    CHECK -->|"the model refused"| PASS["record it and pass it through"]
+    CHECK -->|"looks fine"| DONE["return it"]
+    ESC --> DONE2["return the better answer<br/>and charge for BOTH calls"]
+```
+
+The rule underneath: **a check may only trigger an escalation if escalating
+would actually fix the problem.** Three of the five deliberately do not.
+
+| Check | Escalates? | Why |
+|---|---|---|
+| empty response | **yes** | another model may well produce content |
+| invalid JSON when JSON was asked for | **yes** | stronger models follow formats better |
+| cut off at the token limit | no | a stronger model hits the same limit — raise the limit instead |
+| **the model refused** | **never** | see below |
+| hedging ("I'm not sure") | no | that may be the correct answer |
+
+**A refusal is never escalated.** If a model declines a request, sending it up
+the ladder until one complies is *shopping for a yes*. Switchboard records the
+refusal and passes it through.
+
+Default is to **check and record only**. Escalation makes a second call, which
+doubles the cost of the requests it touches, and nobody should get a bigger bill
+by installing software and leaving the defaults alone.
+
+**An escalated request is charged for both calls.** Charging only for the model
+that produced the final answer would make the feature look free.
+
+---
+
+## 6. The parts
 
 ```mermaid
 flowchart TB
-    subgraph client [Your application]
-      APP["any OpenAI client<br/>base_url = switchboard"]
+    subgraph edge ["The outside"]
+      APP["your application"]
+      BROWSER["a browser"]
     end
 
-    subgraph sb [Switchboard]
-      SITE["site.py<br/>landing page at /"]
-      API["api.py<br/>OpenAI-compatible HTTP"]
-      GUARD["guardrails.py<br/>usage policy"]
+    subgraph sb ["Switchboard — one process"]
+      API["api.py<br/>the HTTP surface"]
       ROUTE["routing/<br/>which model?"]
-      CACHE["cache.py<br/>seen this before?"]
-      POOL["providers/<br/>pool, retries, failover"]
-      LEDGER["ledger/<br/>who, what, how much"]
-      DASH["dashboard.py + metrics.py<br/>reporting"]
+      VERIFY["verification.py<br/>did the answer fail?"]
+      GUARD["guardrails.py<br/>is this work?"]
+      CACHE["cache.py<br/>seen it before?"]
+      POOL["providers/<br/>talking to models"]
+      LEDGER["ledger/<br/>who spent what"]
+      SITE["site.py + dashboard.py<br/>pages a human reads"]
     end
 
-    subgraph up [Model providers]
-      OLL["Ollama / vLLM<br/>local"]
-      OAI["OpenAI format<br/>OpenAI, Groq, OpenRouter, ..."]
-      NAT["Anthropic, Gemini<br/>translated natively"]
+    subgraph up ["Model providers"]
+      LOCAL["Ollama, vLLM<br/>on your machine"]
+      HOSTED["OpenAI, Groq,<br/>OpenRouter, ..."]
+      NATIVE["Anthropic, Gemini<br/>translated"]
     end
 
-    DB[("SQLite or<br/>PostgreSQL")]
-
-    APP -->|POST /v1/chat/completions| API
+    APP --> API
+    BROWSER --> SITE
     API --> GUARD
     API --> ROUTE
     API --> CACHE
     API --> POOL
-    POOL --> OLL
-    POOL --> OAI
-    POOL --> NAT
+    API --> VERIFY
+    POOL --> LOCAL
+    POOL --> HOSTED
+    POOL --> NATIVE
     API --> LEDGER
-    LEDGER --> DB
-    DASH --> DB
+    SITE --> LEDGER
+    LEDGER --> DB[("SQLite or PostgreSQL")]
 ```
 
-Nothing above is a microservice. It is one Python process. The boxes are
-modules, and they are separate modules because each one is a decision that can
-be got wrong independently.
+None of this is a microservice. It is **one Python process**. The boxes are
+files, and they are separate files because each one is a decision that can be
+got wrong on its own.
 
----
+### `api.py` — the front door
 
-## The request lifecycle
+Implements the endpoints. One decision shaped everything else: **the request
+body is not validated.** It is passed through as it arrived and only the model
+name is ever rewritten.
 
-This is the sequence every chat completion goes through. The order is chosen so
-that **every possible refusal happens before any money is spent.**
+Validating would mean modelling every feature the provider supports — tools,
+response formats, whatever ships next month — and anything unmodelled would
+break. Passing through means Switchboard works with features it has never heard
+of.
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant A as api.py
-    participant L as Ledger
-    participant G as Guardrails
-    participant R as Router
-    participant P as Provider
+### `routing/` — choosing a model
 
-    C->>A: POST /v1/chat/completions
-    A->>L: who is this API key?
-    L-->>A: user, or 401
-    A->>A: rate limit for this user? (429)
-    A->>R: model "auto" - which one?
-    R-->>A: model + a reason
-    A->>G: does this prompt look like work?
-    G-->>A: verdict (flag, or 403 in block mode)
-    A->>L: is this user within budget? (402)
-    A->>A: cache hit? -> return, cost 0
-    A->>P: forward the request
-    P-->>A: answer (retry, then fail over on error)
-    A->>L: record user, model, tokens, cost, latency, reason
-    A-->>C: the answer, unchanged
-```
+- `ladder.py` — the no-training policy. Cheapest model that fits.
+- `live.py` — drives a trained router, applies per-request limits, and abstains
+  when it has no opinion.
+- `predictor.py`, `features.py` — turning a question into numbers, and one
+  classifier per model. **These live in the shipped package on purpose**; see
+  the note in section 9.
+- `artifact.py` — saving and loading a trained router, with a readable sidecar
+  describing what it was trained on.
 
-Every one of the numbered failures is a normal OpenAI-shaped error body, so an
-existing client surfaces it properly instead of crashing on an unexpected shape.
+A broken or missing router **never** stops the server. It falls back a tier and
+`/health` says why.
 
----
+### `verification.py` — was the answer obviously broken
 
-## The pieces, and why each exists
+Section 5. Pure string checks over a response already in memory: no model is
+called, nothing is scored, no measurable delay.
 
-### `api.py` — the HTTP surface
+It catches obvious failure, never wrongness. A fluent, confident, completely
+incorrect answer passes every check — and that is the boundary of what can be
+known without a human, stated wherever the numbers appear.
 
-Implements `POST /v1/chat/completions`, `GET /v1/models`, the health endpoints,
-`/metrics` and `/dashboard`.
+### `guardrails.py` — is this work
 
-The important design decision: **the request body is not schema-validated.** It
-is passed through to the provider as it arrived, and only the `model` field is
-ever rewritten. Validating it would mean modelling every OpenAI feature — tools,
-response formats, log probabilities, whatever ships next month — and any feature
-not modelled would break. Passing it through means Switchboard stays compatible
-with things it has never heard of.
+Notices when a company gateway is being used to plan somebody's holiday.
 
-Streaming is a genuine pass-through. The bytes go straight to the client while a
-sniffer reads the token usage out of the stream as it passes, so accounting
-happens without buffering the answer or delaying the first token.
+Shaped by one asymmetry: missing a personal request costs a fraction of a cent;
+wrongly blocking a real one stops an engineer working. So it labels rather than
+blocks, technical-looking content *subtracts* from the score, and
+`switchboard guardrails calibrate` reports its own false-positive rate including
+the exact prompts it got wrong.
 
-### `paths.py` — where files live
+It stores the verdict and which rules matched — **never the prompt text**. A
+feature built to police what people type must not become the reason a company
+starts recording what people type.
 
-Answers one question — "where does X go?" — so nothing else computes a path for
-itself.
+### `cache.py` — never pay twice
 
-Two layouts, detected by whether a `providers.yaml` sits beside the package: a
-checkout or the Docker image keeps everything where it is, an installed copy
-uses the operating system's config and data directories. Writing into
-`site-packages` would be unwritable for many users and wiped on upgrade.
+An in-memory store with a size limit and an expiry. Two rules:
 
-The bug it fixed was quiet: the database default was a *relative* path, so
-running the server from two directories used two databases and silently created
-the second one.
-
-### `catalog.py` — what models exist
-
-Reads `providers.yaml`. Every model has a provider, a price per million tokens
-in and out, a tier, and optionally a `benchmark_alias`.
-
-Two decisions here matter:
-
-**API keys are never in the config.** `providers.yaml` names an environment
-variable (`api_key_env: OPENAI_API_KEY`); the key itself lives in `.env`, which
-is gitignored. The config file is safe to commit, which is the only way a config
-file ever stays correct.
-
-**Two providers may declare the same model.** That is not a conflict — it is
-failover. If Groq is down, the same model is served from OpenRouter.
-
-A provider's `type` selects its adapter. Three exist: `openai-compatible`,
-`anthropic`, and `gemini`.
-
-### `routing/` — which model should answer
-
-Three layers:
-
-- `base.py` — the interface. A strategy takes a `RoutingContext` and returns a
-  `RoutingDecision` with a model *and a reason*. The reason is mandatory because
-  a routing decision you cannot explain afterwards is a routing decision you
-  cannot debug.
-- `baselines.py` — always-cheapest, always-best, random, keyword heuristic.
-  These exist to be beaten. A clever router with no baselines beside it is an
-  unsupported claim.
-- `live.py` — loads a trained artifact and drives it in the live API, applying
-  per-request limits sent as headers.
-- `features.py`, `predictor.py` — turning a question into numbers, and one
-  classifier per model. **These live here, not in `eval/`, and that is
-  load-bearing.** A joblib pickle records the module each class came from,
-  and the Docker image does not copy `eval/`. While they lived there, no
-  trained router could load inside a container: the failure was caught
-  safely, routing switched itself off, and `/health` said "no router
-  artifact loaded" with nothing pointing at the cause. Anything a trained
-  artifact refers to has to ship with the server.
-
-A missing, corrupt, or stale router artifact **never stops the server.** Routing
-switches off, requests fall back to `default_model`, and `/health` says exactly
-why. A routing feature that can take the gateway down is worse than no routing.
-
-### `guardrails.py` — the usage policy
-
-Notices when the company gateway is being used to plan somebody's holiday.
-
-The design is shaped by one asymmetry: missing a personal request costs a
-fraction of a cent, while wrongly blocking a real one stops an engineer working
-at the moment they are trying to work. So:
-
-- The default mode is **`flag`**, which refuses nothing. It writes a label to
-  the ledger and serves the request normally.
-- Technical content in the prompt (code fences, stack traces, SQL, file paths)
-  **subtracts** from the score, so anything that looks like engineering needs a
-  much stronger personal signal to trip.
-- Rules have weights. A phrase that could only ever be personal counts 1.0 and
-  trips on its own; a phrase that shows up in real tickets counts 0.5 and needs
-  a second signal.
-- `block` mode exists, and it ships with an override header, and the refusal
-  message tells you about it. A false positive should cost five seconds, not a
-  support ticket.
-- Only the verdict and the names of the matched rules are stored — never the
-  prompt text. A feature built to police what people type must not become the
-  reason a company starts recording what people type.
-- `switchboard guardrails calibrate` reports its own false-positive rate,
-  including the exact prompts it got wrong.
-
-### `cache.py` — never pay twice for the same question
-
-An in-memory LRU with a TTL. A cache hit costs nothing, and the ledger records
-it as costing nothing — a hit billed at full price would inflate every savings
-figure in the product.
-
-Only *byte-identical, deterministic* requests hit. Semantic matching is
-deliberately not implemented: a cache that occasionally returns a confident
-answer to a question nobody asked is worse than no cache.
+- **Only byte-identical requests hit.** "Similar" is not matched. A cache that
+  confidently answers a question nobody asked is worse than no cache.
+- **A hit is recorded as costing zero**, because it did. Billing it at full
+  price would inflate every savings figure in the product.
 
 ### `providers/` — talking to models
 
 - `openai_compatible.py` — covers most of the industry, because most of the
-  industry copied OpenAI's format.
-- `anthropic.py`, `gemini.py` — the two that did not. See below.
-- `sse.py` — reassembles streamed events from network chunks that do not line
-  up with them.
-- `pool.py` — holds the clients, knows which providers can serve a model, and
-  enforces `LOCAL_ONLY`.
-- `retry.py` — exponential backoff with jitter, for *transient* failures only
-  (timeouts, 429, 5xx). A malformed request is never retried: it would fail
-  identically and cost twice.
-- `breaker.py` — a circuit breaker. After N consecutive failures a provider is
-  skipped for a cooldown, then probed. Without this, every request to a dead
-  provider waits out its full timeout before failing over.
+  industry copied OpenAI's request format.
+- `anthropic.py`, `gemini.py` — the two that did not. These **translate** in
+  both directions, so your application only ever speaks one format.
+- `pool.py` — holds the connections, knows which provider serves which model.
+- `retry.py` — retries *temporary* failures only. A malformed request is never
+  retried; it would fail identically and cost twice.
+- `breaker.py` — after several failures a provider is skipped for a while, then
+  probed. Without it, every request to a dead provider waits out its full
+  timeout before failing over.
 
-Failover rule: a provider that raises or returns 5xx is a failure, and the next
-provider is tried. **A 4xx is not a failover** — the request itself is wrong and
-every other provider would reject it identically, so retrying elsewhere just
-multiplies the cost of one bad request by the number of providers configured.
-
-### Adapters — making every provider look the same
-
-Switchboard speaks OpenAI to your application, always, in both directions. Most
-providers copied that format, so `openai_compatible.py` covers them by
-forwarding requests untouched.
-
-Anthropic and Google did not, so `anthropic.py` and `gemini.py` translate. Four
-differences do the damage if missed:
-
-| | OpenAI | Anthropic | Gemini |
-|---|---|---|---|
-| System prompt | a message in the list | a separate `system` field | `systemInstruction` |
-| The assistant | `role: "assistant"` | same | `role: "model"` |
-| `max_tokens` | optional | **required** | `maxOutputTokens` |
-| Token counts | `prompt_tokens` | `input_tokens` | `promptTokenCount` |
-
-The last row is the dangerous one. Getting it wrong does not crash anything — it
-records every request to that provider as costing zero, and the savings report
-looks wonderful. There is a test named after exactly that failure.
-
-Streaming is translated too, and the rebuilt stream ends with a usage chunk in
-the shape `streaming.py` already reads, so the ledger needs no special case per
-vendor.
-
-**Tool calls are deliberately not translated.** Their formats differ in more
-than naming, and a half-working translation fails deep inside somebody's agent
-with a confusing error. A request carrying `tools` is refused with a message
-pointing at OpenRouter, which implements them.
-
-### `discovery.py` — asking a provider what it has
-
-Format translation makes a provider *callable*. Discovery is what makes it
-*bearable*: hand-typing three hundred model names and prices is not a plan.
-
-`switchboard discover <provider>` asks, parses the answer, and prints YAML.
-
-It refuses to invent a price. Only OpenRouter publishes prices through its API;
-everyone else publishes a bare list. Those models come back marked `REPLACE ME`
-and will not load until a human fills them in. A guessed price would flow
-straight into budget enforcement and savings reports and be wrong invisibly.
-
-It also does not rewrite `providers.yaml`. That file's comments explain why each
-model is priced as it is, and no automatic rewriter preserves them.
-
-### `site.py` — the public landing page
-
-Served at `/` by the same process as the API, so there is one deploy, one URL,
-and no separate marketing site to drift out of date. Same construction rules as
-the dashboard: server-rendered, inline CSS, one inline script, nothing external.
-
-The content rule is enforced by a test: every number on the page must also
-appear in `docs/RESULTS.md`. A landing page that quietly advertises a figure
-nobody can reproduce is the exact failure this project is built against.
+Failover rule: a provider that crashes or returns a server error is retried
+elsewhere. **A "your request is wrong" error is not** — every other provider
+would reject it identically, so trying them all just multiplies the cost of one
+bad request.
 
 ### `ledger/` — who spent what
 
-Two tables. `users` holds names, hashed API keys, budgets and rate limits.
-`requests` holds one row per request: user, requested model, served model,
-tokens, simulated cost, baseline cost, latency, status, routing reason, shadow
-decision, and policy verdict.
+Two tables. People, and one row per request.
 
-The **baseline cost** column is what makes the savings claim auditable. Every
-row stores what that same request would have cost on the top-tier model, so
-"we saved 57%" is a `SELECT`, not a reconstruction from assumptions.
+Every row stores what that request **would have cost on the most expensive
+model**, which is what makes "we saved 57%" a database query rather than a
+reconstruction from assumptions.
 
-Only the hash of an API key is stored. The raw key exists once, at creation, and
-is never recoverable.
-
-Timestamps are naive UTC everywhere, because SQLite does not preserve timezone
-information and carrying tz-aware values through it invites comparison bugs that
-surface months later.
+Only the hash of an API key is stored. The real key exists once, at creation,
+and is never recoverable.
 
 ### `training.py` — learning from your own traffic
 
-The loop shadow mode exists to feed, and the step that was missing between them.
+A benchmark comes with an answer key, so training on one is free. Real traffic
+has none — nobody wrote down the correct response to "why is this test flaky".
 
-A benchmark ships with an answer key, so training on one is free. Real traffic
-has none — nobody wrote down the correct answer to "why is this test flaky" — so
-the ledger held thousands of questions and no outcomes. `POST /v1/feedback`
-supplies the missing half: every response carries an `X-Switchboard-Request-Id`,
-and the application sends back `good` or `bad`.
+So every response carries a request id, and your application sends back a
+verdict:
 
-No label is ever inferred. Guessing from behaviour ("they asked again, so it was
-wrong") is cheap and wrong often enough to matter, and a wrong label does not
-error — it quietly teaches the router something false.
+```
+POST /v1/feedback   {"request_id": "kJ8fQ2...", "rating": "bad"}
+```
 
-Training **refuses** below its thresholds: prompt storage on, 30 rated requests
-per model, 5 of each verdict, 2 models clearing both. Each exists to stop a
-specific failure, and the commonest is one-sided data — forty ratings that all
-say "good" would fit a classifier that answers yes to everything and then wins
-every routing decision.
+That is what a thumbs up/down in your interface calls.
 
-Live data is *sparse* (one model per request) where benchmark data is *dense*
-(every model per question), so each classifier trains only on the requests its
-own model handled. Flattening that into the dense shape would write a zero
-wherever a model was not asked.
+**No label is ever inferred.** Guessing from behaviour ("they asked again, so it
+was wrong") is cheap and wrong often enough to matter — and a wrong label does
+not error, it quietly teaches the router something false.
 
-### `shadow.py` — trying routing without risking anything
+Training refuses below its thresholds: prompt storage on, 30 rated requests per
+model, at least 5 of each verdict, and 2 models clearing both.
 
-Runs the router on every request, records what it *would* have chosen and what
-that would have cost — then ignores the decision and serves the request exactly
-as it would have been served with no router at all.
+### `paths.py` — where files live
 
-After a week of real traffic an operator has a report about their own workload,
-having risked nothing. Two limits are stated everywhere the numbers appear: the
-shadow cost is an estimate (that model was never called, so its token count does
-not exist), and shadow mode cannot say whether quality would have held up (no
-answer was produced to grade).
+Three kinds of file, three places:
 
-### `dashboard.py` and `metrics.py` — reporting
+| | |
+|---|---|
+| shipped data, read-only | inside the package |
+| your config | a config directory |
+| your data | a data directory |
 
-`/dashboard` is server-rendered HTML with inline CSS. No JavaScript, no build
-step, no CDN. It has to work on a machine with no internet — the deployment
-`LOCAL_ONLY` exists to support — and nothing loaded from a CDN should get to see
-when your engineers look at their AI spend.
+Detected rather than configured: if a `providers.yaml` sits next to the package
+that is a deliberate layout (a git checkout, or the Docker image) and everything
+stays there. Otherwise it is a pip install, and the operating system's own
+directories are used.
 
-`/metrics` is the Prometheus text format, written by hand rather than pulling in
-a client library. The rule that matters there is **cardinality**: labels are only
-ever drawn from small fixed sets (a status, a provider, a model). Labelling by
-user or by prompt would create a new time series per user or per request and
-eventually take the monitoring system down.
+It also loads `.env` into the environment, which is how provider API keys reach
+the code that reads them.
 
-### `migrations/` — changing the schema without losing data
+### `site.py` and `dashboard.py` — pages for humans
 
-Alembic, five revisions. The server **refuses to start** against a database
-whose schema does not match the code. Starting anyway does not fail cleanly; it
-fails later, mid-request, with an error pointing somewhere unhelpful.
+Server-rendered HTML with the styling inside the page. No JavaScript framework,
+no build step, nothing loaded from anyone else's server.
+
+Three reasons, in order: it has to work on a machine with no internet; a page
+that needs a build step stops working in a year; and nothing loaded from a
+content network should get to see when your engineers check their AI spend.
 
 ---
 
-## The research half
+## 7. Where the money numbers come from
+
+Every model has a price per million tokens in and out. After each request:
+
+```
+cost      = (input tokens x input price) + (output tokens x output price)
+baseline  = the same tokens priced at your most expensive model
+saved     = baseline - cost
+```
+
+Both numbers are stored **per row**, so any total is a query.
+
+**Local models are priced, not free.** A model running on your own machine costs
+nothing — but then every budget would be measured against zero, and zero is easy
+to stay under. So each local model wears the price tag of the commercial model
+it stands in for, which makes budgets and savings meaningful. Every screen that
+shows money says "simulated pricing" plainly.
+
+---
+
+## 8. The research half
 
 Everything under `eval/` is offline analysis. It is **not** in the Docker image
 and is not needed to run the gateway.
 
 ```mermaid
 flowchart LR
-    DL["public benchmark<br/>datasets"] --> BUILD["bench build<br/>normalise"]
-    BUILD --> GRID["Grid<br/>question x model:<br/>correct? cost? latency?"]
-    GRID --> REPLAY["bench replay<br/>score baselines"]
-    GRID --> TRAIN["bench train<br/>per-model classifiers"]
-    GRID --> SLA["bench sla<br/>latency budgets"]
+    DATA["public datasets:<br/>696k recorded answers<br/>from real models"] --> GRID["normalise into a table:<br/>question x model<br/>-> right? cost? time?"]
+    GRID --> REPLAY["score simple strategies"]
+    GRID --> TRAIN["train per-model<br/>classifiers"]
+    GRID --> SLA["measure what a speed<br/>promise costs"]
     TRAIN --> ART["router.joblib"]
-    ART --> LIVE["routing/live.py<br/>in the server"]
+    ART --> LIVE["the running server"]
 ```
 
-The whole trick is that these datasets contain **recorded answers from real
-commercial models**. Once normalised into a grid of question × model → (correct,
-cost, latency), any routing strategy can be scored exactly, offline, with zero
-API calls and zero spend. That is what made it possible to evaluate against
-GPT-5, Claude and Gemini without a budget.
+The trick is that those datasets contain **answers real commercial models
+already gave**. Once arranged into a table of question × model → (right?, cost,
+time), any routing rule can be scored exactly — offline, with no API calls and
+no spend. That is how a project with no budget produced numbers about GPT-5,
+Claude and Gemini.
 
-Held-out splits are by question, never by row, so the same question cannot
-appear in training and test under two different models.
-
----
-
-## Design rules that show up everywhere
-
-**Safe by default, useful on request.** Prompt storage is off. Blocking is off.
-`LOCAL_ONLY` exists. Nobody should acquire a legal liability by installing
-software and leaving the defaults alone.
-
-**Never flatter the numbers.** Cache hits cost zero. Cascades are charged for
-every call they make. Budget-blocked requests cost zero. Shadow projections are
-labelled as projections. Each of these is a place where the self-serving version
-of the accounting would have looked better.
-
-**A degraded feature must not take the service down.** No router: fall back and
-say so. Provider down: fail over. Stale artifact: routing off, `/health`
-explains. The one exception is a broken *policy* file, which is fatal at startup
-— a policy an operator believes is running must never be silently off.
-
-**Every decision records its reason.** `routing_reason`, `guardrail_rules`,
-`X-Switchboard-Cache`, the circuit-breaker snapshot in `/health`. A gateway you
-cannot interrogate after the fact is a gateway nobody will trust with production
-traffic.
+Test splits are **by question**, never by row, so the same question cannot
+appear in both training and testing under two different models.
 
 ---
 
-## Where the numbers are
+## 9. Rules that shaped everything
 
-See [RESULTS.md](RESULTS.md) for every measured figure, how it was produced, and
-what it does not prove.
+**Safe by default, useful on request.** Prompt storage off. Blocking off.
+Escalation off. Local-only available. Nobody should acquire a legal liability or
+a larger bill by installing software and leaving the defaults alone.
+
+**Never flatter the numbers.** Cache hits cost zero. Escalations are charged for
+both calls. Refused requests cost zero. Shadow-mode figures are labelled as
+projections. Speed is judged by the bad days, not the typical day. Each of those
+is a place where the self-serving version of the accounting would have looked
+better.
+
+**A degraded feature must not take the service down.** No router: fall back a
+tier and say so. Provider down: fail over. Stale artifact: refuse it with a
+message saying to retrain. The one exception is a broken *policy* file, which is
+fatal at startup — a policy an operator believes is running must never be
+silently off.
+
+**Every decision records its reason.** The routing reason, which guardrail rules
+matched, whether the cache hit, how many attempts were made. A gateway you
+cannot interrogate afterwards is one nobody will trust with real traffic.
+
+**Anything a trained artifact refers to must ship with the server.** Learned the
+hard way: a saved router records which file its classes came from, and those
+classes lived in `eval/`, which the Docker image deliberately does not copy. So
+inside a container no trained router could load *at all*. The failure was caught
+safely, routing switched itself off, and the health endpoint said "no router
+artifact loaded" with nothing pointing at the cause.
+
+---
+
+## 10. Where the numbers are
+
+[RESULTS.md](RESULTS.md) has every measured figure, the command that produces
+it, and — for each one — what it does **not** prove. Including the two
+experiments that failed and the approach they killed.

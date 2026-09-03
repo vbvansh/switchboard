@@ -44,3 +44,10 @@ cache/
 .idea/
 Thumbs.db
 desktop.ini
+
+# --- Personal notes, deliberately not published -----------------------------
+# The story of how the project was built, and the full list of problems hit
+# along the way. Kept local on purpose. Listed here so a `git add .` cannot
+# sweep them into a commit by accident.
+JOURNEY.md
+CHALLENGES.md
