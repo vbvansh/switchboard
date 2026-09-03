@@ -1,49 +1,116 @@
 # Switchboard provider registry
-# ===========================================================================
-# Written by `switchboard init`. Edit it freely - this is a normal
-# config file and nothing regenerates it behind your back.
+# =============================================================================
+# Declare which AI providers you have and which models they offer. This is the
+# only file you need to edit to add a provider - no Python changes.
 #
-# API KEYS DO NOT GO IN THIS FILE. `api_key_env` names an environment
-# variable to read the key from, so this file is safe to commit.
-# ===========================================================================
+# Everything else in Switchboard reads from here: routing decisions, cost
+# accounting, failover, and the dashboard.
+#
+# API KEYS DO NOT GO IN THIS FILE. Use `api_key_env` to name an environment
+# variable holding the key. This file is safe to commit; keys are not.
+# =============================================================================
 
-# The model a 'give everyone the best' setup would use. Every request
-# records what it WOULD have cost here - that difference is the
-# savings figure on the dashboard.
-baseline_model: "qwen3:4b"
+# The model a "just give everyone the best" setup would use. Every request
+# records what it WOULD have cost here - that difference is the savings figure.
+baseline_model: qwen2.5:7b
 
-# Models the router may choose between, CHEAPEST FIRST. The order is
-# validated on load, and escalation climbs it one rung at a time.
+# Models the router may choose between, cheapest first. Order is validated on
+# load, so a mistake here fails immediately rather than corrupting decisions.
+# Models can exist without being on the ladder - they stay directly callable
+# but the router will not pick them.
 ladder:
-  - "qwen3:4b"
+  - qwen2.5:1.5b
+  - qwen2.5:3b
+  - qwen3:4b
+  - qwen2.5:7b
 
-# Fallback for a model not declared below. Never zero: an unpriced
+# Fallback pricing for a model not declared below. Never zero: an unpriced
 # model costing nothing would understate spend and overstate savings.
 default_pricing:
   input_per_mtok: 1.0
   output_per_mtok: 5.0
 
 providers:
-
-  # Ollama (local, free, no key) - runs on your machine; nothing leaves the host
+  # ---------------------------------------------------------------------------
+  # Local Ollama. No API key, no network egress, no cost.
+  #
+  # Prices below are SIMULATED. Local inference is free; each model is given
+  # the price tag of a commercial model of comparable capability so that budget
+  # accounting and savings figures mean something. Adjust to taste.
+  # ---------------------------------------------------------------------------
   - id: ollama-local
     type: openai-compatible
+    # ${VAR:-default} is expanded from the environment on load, so this one
+    # file works on a laptop and inside a container. Docker reaches the host's
+    # Ollama as host.docker.internal, not localhost - docker-compose.yml sets
+    # OLLAMA_BASE_URL accordingly.
     base_url: ${OLLAMA_BASE_URL:-http://localhost:11434/v1}
     enabled: true
-    # Local inference is free. Each model wears the price
-    # tag of the commercial model it stands in for, so
-    # budgets and savings mean something. No real money.
     simulated_pricing: true
-    timeout_seconds: 600  # a cold load can be slow
+    timeout_seconds: 600      # a cold 7b load on a small GPU is slow to start
+
     models:
-      - id: "qwen3:4b"
+      - id: qwen2.5:1.5b
+        tier: T0
+        stands_in_for: budget/nano commercial tier
+        input_per_mtok: 0.10
+        output_per_mtok: 0.40
+        context_window: 32768
+        benchmark_alias: llama-3-8b-instruct-lite
+        typical_latency_s: 1.2
+
+      - id: qwen2.5:3b
         tier: T1
-        stands_in_for: "small general-purpose tier"
+        stands_in_for: small general-purpose commercial tier
         input_per_mtok: 0.25
         output_per_mtok: 1.25
+        context_window: 32768
+        benchmark_alias: gemma-2-9b-it
+        typical_latency_s: 2.0
 
+      - id: qwen3:4b
+        tier: T2
+        stands_in_for: mid reasoning tier
+        # Output priced high because this model emits <think> blocks, which
+        # inflate completion length by roughly 50x. Measured, not guessed:
+        # 324 output tokens on average versus 4 for the others.
+        input_per_mtok: 1.00
+        output_per_mtok: 5.00
+        context_window: 32768
+        emits_thinking: true
 
-  # OpenRouter (one key, hundreds of models, publishes prices) - the only provider whose API gives real prices - start here
+      - id: qwen2.5:7b
+        tier: T3
+        stands_in_for: frontier tier
+        input_per_mtok: 3.00
+        output_per_mtok: 15.00
+        context_window: 32768
+        # Lets a router trained on public benchmarks drive this model. The
+        # hosted `qwen2.5-7b-instruct` is the same family, not the same
+        # binary - an approximation, and deliberately a visible one.
+        benchmark_alias: qwen2.5-7b-instruct
+        typical_latency_s: 6.5
+
+      - id: stable-code:3b-code-q4_0
+        tier: T0-code
+        stands_in_for: small code-completion model
+        input_per_mtok: 0.15
+        output_per_mtok: 0.60
+        context_window: 16384
+        # Base completion model, not instruction-tuned. Kept callable but off
+        # the ladder: it cannot follow chat instructions, so comparing it on
+        # instruction-following tasks would be meaningless.
+
+  # ---------------------------------------------------------------------------
+  # Commercial providers. All disabled by default - enable the ones you have
+  # keys for. PRICES BELOW ARE PLACEHOLDERS: check your provider's current
+  # price list and correct them before trusting any cost figure.
+  # ---------------------------------------------------------------------------
+
+  # OpenRouter reaches models from many vendors with one key, and it is the
+  # only provider that publishes PRICES through its API - so
+  # `switchboard discover openrouter` returns hundreds of models ready to
+  # paste, with real numbers. Start here.
   - id: openrouter
     type: openai-compatible
     base_url: https://openrouter.ai/api/v1
@@ -51,15 +118,12 @@ providers:
     enabled: false
     models: []
 
-  # OpenAI - publishes no prices; you will be asked for them
-  - id: openai
-    type: openai-compatible
-    base_url: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    enabled: false
-    models: []
-
-  # Anthropic (Claude) - native adapter; tool calls go via OpenRouter instead
+  # Anthropic's own API, spoken natively. Claude is also reachable through
+  # OpenRouter above; the difference is that this one has no middleman, no
+  # markup and no third-party outage between you and Anthropic.
+  #
+  # `type: anthropic` selects the translating adapter. Tool calls are NOT
+  # translated - use OpenRouter for those. See switchboard/providers/anthropic.py.
   - id: anthropic
     type: anthropic
     base_url: https://api.anthropic.com/v1
@@ -67,7 +131,9 @@ providers:
     enabled: false
     models: []
 
-  # Google Gemini - native adapter; tool calls go via OpenRouter instead
+  # Google Gemini, spoken natively. Same trade-off as Anthropic above.
+  # Run `switchboard discover gemini` to list the models, then fill in prices
+  # from Google's price page - their API does not publish them.
   - id: gemini
     type: gemini
     base_url: https://generativelanguage.googleapis.com/v1beta
@@ -75,10 +141,26 @@ providers:
     enabled: false
     models: []
 
-  # Groq (fast, has a free tier) - cheapest way to verify a real remote provider end to end
+  - id: openai
+    type: openai-compatible
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    enabled: false
+    models: []
+
+  # Free tier available at time of writing. Verify current limits yourself.
   - id: groq
     type: openai-compatible
     base_url: https://api.groq.com/openai/v1
     api_key_env: GROQ_API_KEY
+    enabled: false
+    models: []
+
+  # Self-hosted inference servers speak the same format. Point this at your own
+  # vLLM, LM Studio, llama.cpp, or TGI instance.
+  - id: self-hosted
+    type: openai-compatible
+    base_url: http://your-server:8000/v1
+    api_key_env: SELF_HOSTED_API_KEY
     enabled: false
     models: []

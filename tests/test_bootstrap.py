@@ -13,6 +13,8 @@ wrong in a way nobody can see from the outside.
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 import yaml
 
@@ -28,6 +30,8 @@ from switchboard.bootstrap import (
     summarise,
 )
 from switchboard.discovery import DiscoveredModel
+
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def local(*models: ChosenModel) -> ChosenProvider:
@@ -269,3 +273,45 @@ def test_every_known_provider_has_an_adapter() -> None:
 
 def test_known_providers_are_indexed_consistently() -> None:
     assert set(PROVIDERS_BY_ID) == {spec["id"] for spec in KNOWN_PROVIDERS}
+
+
+# --- Not destroying somebody's config ---------------------------------------
+
+
+def test_a_committed_catalog_is_recognised() -> None:
+    """The guard this module most needed, learned the hard way.
+
+    In a checkout the config directory IS the repository root, so
+    `switchboard init --force` overwrote the project's own committed
+    providers.yaml with one describing whatever models happened to be installed
+    locally. 71 tests broke with nothing visibly wrong: the file was valid, the
+    wizard did exactly what it was asked, and the catalog every test loads had
+    quietly become a different catalog.
+    """
+    from switchboard.bootstrap import is_tracked_by_git
+
+    assert is_tracked_by_git(PROJECT_ROOT / "providers.yaml")
+
+
+def test_an_untracked_file_is_not_protected(tmp_path) -> None:
+    """A file nobody has committed is the user's own scratch config, and
+    replacing that is the whole point of the wizard."""
+    from switchboard.bootstrap import is_tracked_by_git
+
+    scratch = tmp_path / "providers.yaml"
+    scratch.write_text("providers: []", encoding="utf-8")
+    assert not is_tracked_by_git(scratch)
+
+
+def test_no_git_available_is_not_an_error(tmp_path, monkeypatch) -> None:
+    """Most installs are not repositories at all. Without git the answer is
+    simply 'not tracked', and the normal --force rules apply."""
+    import subprocess
+
+    from switchboard import bootstrap
+
+    def explode(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(subprocess, "run", explode)
+    assert not bootstrap.is_tracked_by_git(tmp_path / "providers.yaml")

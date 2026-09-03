@@ -24,7 +24,9 @@ straight into budget enforcement and every savings figure.
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from switchboard.discovery import DiscoveredModel
 
@@ -86,6 +88,36 @@ KNOWN_PROVIDERS: tuple[dict, ...] = (
 )
 
 PROVIDERS_BY_ID = {entry["id"]: entry for entry in KNOWN_PROVIDERS}
+
+
+def is_tracked_by_git(path: Path) -> bool:
+    """Is this file committed to a repository?
+
+    THE GUARD THIS MODULE MOST NEEDED, learned the hard way. In a checkout,
+    the config directory IS the repository root - so `switchboard init --force`
+    happily overwrote the project's own committed providers.yaml with one
+    describing whatever models happened to be installed locally.
+
+    The result was 71 test failures with nothing obviously wrong: the file was
+    valid, the wizard had done exactly what it was asked, and the catalog every
+    test loads had quietly become a different catalog.
+
+    A file nobody has committed is the user's own scratch config and replacing
+    it is fine. A committed one belongs to a project, and overwriting it is
+    destroying somebody's work.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", str(path)],
+            cwd=path.parent,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # No git, or no repository. Then it cannot be tracked, and the normal
+        # --force rules apply.
+        return False
+    return result.returncode == 0
 
 #: Used when a local model has no meaningful price of its own. Local inference
 #: is free, and pricing it at zero would make every budget and savings figure

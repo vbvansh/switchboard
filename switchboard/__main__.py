@@ -172,6 +172,27 @@ def init(
     console.print(f"Config will be written to [cyan]{target}[/cyan]")
     console.print(f"Data (ledger, router) lives in [cyan]{paths.data_dir()}[/cyan]\n")
 
+    # A catalog somebody has committed belongs to a project, not to this
+    # machine. --force deliberately does NOT get past this: overwriting it
+    # replaces a file the repository's own tests load, and the failure that
+    # produces is 71 broken tests with nothing visibly wrong - the file is
+    # valid, the wizard did what it was told, and the catalog quietly became a
+    # different catalog describing whatever models happen to be installed here.
+    if target.exists() and bootstrap.is_tracked_by_git(target):
+        console.print(
+            f"[red]{target} is committed to a git repository.[/red]\n"
+            "  Refusing to overwrite it - that file belongs to the project, "
+            "and replacing it with a catalog describing this machine's models "
+            "would break anything that depends on it.\n\n"
+            "  If you meant to configure a separate instance, point "
+            "SWITCHBOARD_HOME somewhere else:\n"
+            "    [cyan]$env:SWITCHBOARD_HOME = \"$HOME\\.switchboard\"; "
+            "switchboard init[/cyan]\n\n"
+            "  If you really do mean to regenerate the project's catalog, "
+            "delete it first and re-run."
+        )
+        raise typer.Exit(code=1)
+
     if target.exists() and not force:
         console.print(
             f"[yellow]{target} already exists.[/yellow] "
