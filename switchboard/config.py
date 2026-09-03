@@ -19,14 +19,24 @@ PROJECT_ROOT = paths.BUNDLE_ROOT
 # Model name a client can send to hand model choice to Switchboard.
 AUTO_MODEL = "auto"
 
+#: Re-exported so `switchboard where` and the tests have one name to use.
+#: The loading itself happens in switchboard/paths.py, which catalog.py
+#: also imports - see the note there for why that placement matters.
+LOADED_ENV_FILES = paths.LOADED_ENV_FILES
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SWITCHBOARD_",
-        # A .env beside the working directory still wins, which is what a
-        # developer in a checkout expects. The second path is where an
-        # installed copy keeps it, so `switchboard init` has somewhere to write
-        # that survives an upgrade.
+        # The config directory wins over the working directory, matching
+        # paths.load_env_files(): almost every project has its own .env, and
+        # stepping into one must not silently repoint somebody's gateway.
+        #
+        # Note the order is the REVERSE of load_env_files(). pydantic-settings
+        # gives priority to the LAST file in the tuple; load_dotenv with
+        # override=False gives it to the first one loaded. Same outcome, two
+        # opposite conventions - which is exactly the sort of thing that drifts
+        # apart silently, so a test pins it.
         env_file=(".env", str(paths.config_dir() / ".env")),
         env_file_encoding="utf-8",
         extra="ignore",

@@ -150,6 +150,48 @@ def default_database_url() -> str:
     return "sqlite:///" + database_path().as_posix()
 
 
+def load_env_files() -> list[str]:
+    """Put .env into the process environment, not just into Settings.
+
+    THE BUG THIS FIXES, which shipped from the day providers were added and
+    went unnoticed because all development used a local Ollama needing no key.
+
+    pydantic-settings reads .env to populate `Settings` - but PROVIDER keys are
+    not Settings fields. `providers.yaml` names an environment variable
+    (`api_key_env: GROQ_API_KEY`) and `catalog.py` reads it straight from
+    os.environ. Nothing connected the two, so a key written exactly where
+    .env.example says to write it never reached the code looking for it, and
+    every remote provider reported "no key" forever.
+
+    IT LIVES HERE, not in config.py, and that placement is the second half of
+    the fix. The first version put it in config.py - and `catalog.py` does not
+    import config, so anything that loaded the catalog without going through
+    settings still saw no keys. This module is imported by both, so there is no
+    ordering to get wrong.
+
+    `override=False` matters: a variable already set in the real environment
+    always wins. That is what makes a one-off `$env:GROQ_API_KEY = "..."` work,
+    and what stops a stale .env quietly overriding a deliberate export.
+
+    Load order gives the CONFIG DIRECTORY priority over the working directory.
+    An installed copy keeps its keys in the config dir, and almost every
+    project on a machine has its own .env - stepping into one of those must not
+    silently repoint somebody's gateway.
+    """
+    from dotenv import load_dotenv
+
+    loaded = []
+    for candidate in (config_dir() / ".env", Path(".env")):
+        if candidate.is_file() and load_dotenv(candidate, override=False):
+            loaded.append(str(candidate))
+    return loaded
+
+
+#: Which .env files were read, for `switchboard where`. Populated at import,
+#: so every entry point gets provider keys without having to remember to ask.
+LOADED_ENV_FILES = load_env_files()
+
+
 def describe() -> dict[str, str]:
     """Where everything is, for `switchboard where` and /health."""
     return {

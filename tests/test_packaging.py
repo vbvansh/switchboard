@@ -246,3 +246,87 @@ def test_describe_reports_the_layout() -> None:
     described = paths.describe()
     assert described["layout"] in {"bundled", "installed"}
     assert described["providers_file"].endswith("providers.yaml")
+
+
+# --- Provider keys actually reaching the code -------------------------------
+
+
+def test_env_files_are_loaded_into_the_environment(tmp_path, monkeypatch) -> None:
+    """THE bug this guards, which shipped unnoticed from the day providers were
+    added.
+
+    pydantic-settings reads .env to populate Settings - but PROVIDER keys are
+    not Settings fields. providers.yaml names an environment variable and
+    catalog.py reads it from os.environ. Nothing connected the two, so a key
+    written exactly where .env.example says to write it never reached the code
+    looking for it, and every remote provider reported "no key" forever.
+
+    It went unnoticed because all development used a local Ollama needing none.
+    """
+    from dotenv import load_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text("SWITCHBOARD_TEST_PROVIDER_KEY=abc123\n", encoding="utf-8")
+    monkeypatch.delenv("SWITCHBOARD_TEST_PROVIDER_KEY", raising=False)
+
+    assert load_dotenv(env, override=False)
+    import os
+
+    assert os.environ["SWITCHBOARD_TEST_PROVIDER_KEY"] == "abc123"
+
+
+def test_a_real_environment_variable_beats_a_dotenv_file(
+    tmp_path, monkeypatch
+) -> None:
+    """`override=False` is what makes a one-off `$env:GROQ_API_KEY = "..."`
+    work, and stops a stale .env quietly overriding a deliberate export."""
+    from dotenv import load_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text("SWITCHBOARD_TEST_PROVIDER_KEY=from-file\n", encoding="utf-8")
+    monkeypatch.setenv("SWITCHBOARD_TEST_PROVIDER_KEY", "from-shell")
+
+    load_dotenv(env, override=False)
+    import os
+
+    assert os.environ["SWITCHBOARD_TEST_PROVIDER_KEY"] == "from-shell"
+
+
+def test_config_records_which_env_files_it_read() -> None:
+    """`switchboard where` prints these. "I put the key in .env and it says no
+    key" is otherwise impossible to diagnose without reading the source."""
+    from switchboard import config
+
+    assert isinstance(config.LOADED_ENV_FILES, list)
+
+
+def test_dotenv_is_a_declared_dependency() -> None:
+    """It is now load-bearing rather than incidental: without it no provider
+    key written to .env ever reaches a provider."""
+    declared = " ".join(MANIFEST["project"]["dependencies"]).lower()
+    assert "python-dotenv" in declared
+
+
+def test_the_two_env_orderings_agree_on_who_wins() -> None:
+    """Same intent, two opposite conventions - exactly what drifts apart.
+
+    pydantic-settings gives priority to the LAST file in its tuple.
+    `load_dotenv(override=False)` gives it to the FIRST one loaded. Both must
+    end up preferring the config directory: almost every project on a machine
+    has its own .env, and stepping into one must not silently repoint
+    somebody's gateway at different models.
+    """
+    from switchboard import paths
+    from switchboard.config import Settings
+
+    config_env = str(paths.config_dir() / ".env")
+    declared = Settings.model_config["env_file"]
+
+    # pydantic-settings: last wins, so the config dir must be last.
+    assert declared[-1] == config_env
+
+    # load_env_files: first wins, so the config dir must be first there.
+    import inspect as _inspect
+
+    source = _inspect.getsource(paths.load_env_files)
+    assert source.index('config_dir() / ".env"') < source.index('Path(".env")')

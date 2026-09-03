@@ -65,6 +65,7 @@ subject to per-request latency, cost and quality limits. What works today:
 - A dependency-free `/dashboard` page
 - A usage policy that flags personal requests and reports its own error rate
 - Native Anthropic and Gemini adapters, plus model discovery from any provider
+- Verified end to end against a live provider (Groq) - see [RESULTS.md section 9](docs/RESULTS.md)
 - A public landing page served by the app itself, deployable in one step
 - Train the router on YOUR traffic, from ratings your application sends back
 - Routing that works on the first request, with no training at all
@@ -515,6 +516,34 @@ nobody could see from the outside.
 It also does not edit `providers.yaml` for you. That file is full of comments
 explaining why each model is priced as it is, and no automatic rewriter
 preserves them.
+
+### Provider API keys
+
+`providers.yaml` names an environment variable; the key itself goes in `.env`,
+which is gitignored. That is what makes the config file safe to commit.
+
+```
+# .env
+GROQ_API_KEY=gsk_...
+OPENROUTER_API_KEY=sk-or-...
+```
+
+These are loaded into the process environment when Switchboard starts. A
+variable already set in your real environment always wins, so
+`$env:GROQ_API_KEY = "..."` still works for a one-off.
+
+```powershell
+switchboard where        # shows which .env files were actually read
+switchboard providers    # shows which providers can see a key
+```
+
+**This was broken until now**, and it is worth knowing why. `.env` was read by
+the settings loader, which populates Switchboard's own options — but provider
+keys are not Switchboard options. They are named in `providers.yaml` and read
+from the environment by `catalog.py`, and nothing connected the two. A key
+written exactly where the documentation said to write it never reached the code
+looking for it, and every remote provider reported "no key" forever. It went
+unnoticed because all development used a local Ollama, which needs no key.
 
 ## Adding a provider
 

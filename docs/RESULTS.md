@@ -292,6 +292,54 @@ foundation that does not hold. The experiment took an afternoon.
 
 ---
 
+## 9. One adapter, verified against a live API
+
+Everything above is offline. This is the one measurement made against a real
+provider, with a real key, spending real (if tiny) money.
+
+**Groq, `openai-compatible` adapter, 2026-09-03.**
+
+```
+switchboard discover groq
+  -> 14 models, 0 with published prices and 14 needing prices filled in by hand
+```
+
+Discovery authenticated, parsed the reply, and **refused to invent prices** —
+Groq's API does not publish them, so every model came back marked `REPLACE ME`
+rather than guessed at. That is the designed behaviour, confirmed live.
+
+Then the full cold-start chain, end to end:
+
+```
+1. ladder chose  : openai/gpt-oss-20b
+   reason        : cheapest model that fits (33 chars); no prediction was made
+2. called openai/gpt-oss-20b
+   answer        : ''
+   verification  : empty_response
+   -> escalating to openai/gpt-oss-120b
+3. called openai/gpt-oss-120b
+   answer        : 'Hello there, friend!'
+   verification  : no problems detected
+
+   TOTAL CHARGED : $0.00025550  (both calls, as the ledger records it)
+```
+
+**The cheap model really did fail.** `gpt-oss-20b` is a reasoning model: given
+a 512-token budget it spent all of it reasoning and returned empty content, with
+HTTP 200 and a full usage block. Nothing about the response looked like an
+error. The mechanical check caught it, escalation recovered it on the next rung,
+and both calls were charged for.
+
+That is the design working on a live provider on its first attempt — including
+the part that matters most, which is that a plausible-looking 200 with no answer
+in it was still treated as a failure.
+
+**What it does not prove.** One provider, one adapter, one shape of failure. The
+Anthropic and Gemini adapters remain unverified against their live APIs, and the
+prices in `providers.yaml` for these models are placeholders, clearly marked.
+
+---
+
 ## What was NOT measured
 
 Stated plainly, because a results document that only lists wins is marketing.
@@ -320,6 +368,10 @@ Stated plainly, because a results document that only lists wins is marketing.
   recorded response shapes, which proves the translation matches the documented
   format. It does not prove the format is still current. Only a call with a real
   key does that, and nobody has made one.
+
+  The `openai-compatible` adapter HAS now been verified against a live provider
+  (Groq), including discovery, pricing, a real chat completion, verification and
+  escalation — see section 9.
 
 ---
 

@@ -20,6 +20,8 @@ baseline_model: qwen2.5:7b
 # but the router will not pick them.
 ladder:
   - qwen2.5:1.5b
+  - openai/gpt-oss-20b
+  - openai/gpt-oss-120b
   - qwen2.5:3b
   - qwen3:4b
   - qwen2.5:7b
@@ -153,8 +155,31 @@ providers:
     type: openai-compatible
     base_url: https://api.groq.com/openai/v1
     api_key_env: GROQ_API_KEY
-    enabled: false
-    models: []
+    enabled: true
+    models:
+      # PRICES ARE PLACEHOLDERS - check https://groq.com/pricing and correct
+      # them before trusting any cost figure. Groq's API publishes no prices,
+      # so `switchboard discover groq` marks every model REPLACE ME rather
+      # than guessing.
+      - id: "openai/gpt-oss-20b"
+        tier: T1
+        stands_in_for: small hosted open model
+        input_per_mtok: 0.10
+        output_per_mtok: 0.50
+        context_window: 131072
+        # Both of these ARE in the benchmark data, so the shipped router can
+        # actually drive them - see `switchboard router info`.
+        benchmark_alias: gpt-oss-20b
+        typical_latency_s: 0.6
+
+      - id: "openai/gpt-oss-120b"
+        tier: T2
+        stands_in_for: larger hosted open model
+        input_per_mtok: 0.15
+        output_per_mtok: 0.75
+        context_window: 131072
+        benchmark_alias: gpt-oss-120b
+        typical_latency_s: 1.2
 
   # Self-hosted inference servers speak the same format. Point this at your own
   # vLLM, LM Studio, llama.cpp, or TGI instance.

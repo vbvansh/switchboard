@@ -634,6 +634,17 @@ def where() -> None:
     table.add_row("Ledger (default)", layout["database"])
     table.add_row("Ledger (in use)", settings.database_url)
     table.add_row("Router artifact", settings.router_path)
+
+    # Worth its own row: "I put the key in .env and it still says no key" is
+    # otherwise impossible to diagnose without reading the source. Provider
+    # keys are read from the environment, and .env only reaches it because
+    # switchboard/config.py loads these files at import.
+    from switchboard.config import LOADED_ENV_FILES
+
+    table.add_row(
+        "Env files read",
+        "\n".join(LOADED_ENV_FILES) if LOADED_ENV_FILES else "(none found)",
+    )
     console.print(table)
 
     if layout["layout"] == "bundled":
