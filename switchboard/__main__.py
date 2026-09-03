@@ -1669,6 +1669,194 @@ def bench_train(
         console.print(f"Wrote [cyan]{chart}[/cyan]")
 
 
+@bench_cli.command("train-broad")
+def bench_train_broad(
+    source: str = typer.Argument("all", help="A source, or `all` for every one."),
+    holdout_suites: int = typer.Option(6, help="Whole suites held back."),
+    test_size: float = typer.Option(0.25, help="Share of questions held back."),
+    features: str = typer.Option("tfidf", help="surface | tfidf | embedding."),
+    seed: int = typer.Option(0, help="Seed for the splits and classifiers."),
+    out: str = typer.Option("", help="Write the per-suite table as CSV."),
+) -> None:
+    """Train ONE router across every suite, and report where it actually works.
+
+    Every router this project shipped was trained on a single suite of academic
+    multiple-choice questions, which is most of why it had no opinion about a
+    chat message. Forty suites are on disk and nobody has used them, because
+    the old trainer needed a complete grid and combining suites empties it.
+
+    This uses the sparse trainer written for live traffic, where each question
+    was answered by one model - the same shape benchmark data has once you stop
+    demanding a rectangle.
+
+    Two numbers come out. IN-DOMAIN is held-out questions from suites it
+    trained on: what a user gets whose traffic resembles a covered domain, and
+    the one that decides whether shipping this is worth it. TRANSFER is whole
+    held-out suites, expected to fail, measured anyway.
+
+    The per-suite table is the real output. An average over forty suites hides
+    every weak row, and a weak row is precisely what an operator needs to know
+    before trusting a routing decision.
+    """
+    _require_eval()
+    import pandas as pd
+
+    from eval import benchmarks
+    from eval.benchmarks import broad
+
+    sources = list(benchmarks.SOURCES) if source == "all" else [source]
+
+    frames = []
+    for name in sources:
+        if not benchmarks.is_cached(name):
+            console.print(
+                f"[yellow]{name} is not cached; skipping.[/yellow] "
+                f"Build it with: switchboard bench build {name}"
+            )
+            continue
+        console.print(f"Loading [cyan]{name}[/cyan] ...")
+        loaded = benchmarks.load(name)
+        rows = broad.rows_with_text(loaded.frame, benchmarks.load_queries(name))
+        # Suites can share a name across sources; qualify them so holding one
+        # out actually holds out one thing.
+        rows["benchmark"] = name + "/" + rows["benchmark"].astype(str)
+        frames.append(rows)
+
+    if not frames:
+        console.print("[red]No cached sources. Run: switchboard bench build all[/red]")
+        raise typer.Exit(code=1)
+
+    rows = pd.concat(frames, ignore_index=True)
+    console.print(
+        f"[green]{len(rows):,}[/green] answers, "
+        f"[green]{rows['query_id'].nunique():,}[/green] questions, "
+        f"[green]{rows['model'].nunique()}[/green] models, "
+        f"[green]{rows['benchmark'].nunique()}[/green] suites."
+    )
+    console.print(
+        f"Training across all suites, holding back [cyan]{holdout_suites}[/cyan] "
+        "entirely ...\n"
+    )
+
+    try:
+        report = broad.run(rows, holdout_suites, test_size, features, seed)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[dim]Held out: {', '.join(report.held_out_suites)}[/dim]")
+    console.print(f"[dim]Features: {report.features}[/dim]\n")
+
+    headline = Table(title="Does breadth of training data help?")
+    headline.add_column("Setting")
+    headline.add_column("Mean AUC", justify="right")
+    headline.add_column("What it means")
+
+    def colour_for(value: float) -> str:
+        if value != value:
+            return "dim"
+        return "green" if value >= 0.65 else "yellow" if value >= 0.57 else "red"
+
+    in_domain = report.in_domain_auc
+    transfer = report.transfer_auc
+    headline.add_row(
+        "[bold]In-domain[/bold] (new questions, seen suites)",
+        f"[{colour_for(in_domain)}]{in_domain:.3f}[/{colour_for(in_domain)}]",
+        "what a user with covered traffic gets",
+    )
+    within = report.within_suite_auc
+    headline.add_row(
+        "[bold]Within one suite[/bold] (same kind of question)",
+        f"[{colour_for(within)}]{within:.3f}[/{colour_for(within)}]",
+        "can it tell hard from easy?",
+    )
+    headline.add_row(
+        "Transfer (whole unseen suites)",
+        f"[{colour_for(transfer)}]{transfer:.3f}[/{colour_for(transfer)}]",
+        "expected to fail; measured anyway",
+    )
+    console.print(headline)
+    console.print(
+        "[dim]0.5 is guessing, 0.65+ is genuinely useful.\n"
+        "The gap between the first two rows is the point. The first mixes "
+        "suites, so it rewards learning which model suits which KIND of "
+        "question - topic routing, which is real value. The second asks "
+        "the harder thing: among questions of the same kind, can it tell "
+        "which ones this model will get wrong?[/dim]\n"
+    )
+
+    suites = Table(title="COVERAGE - which kinds of question can it judge?")
+    suites.add_column("Suite")
+    suites.add_column("Questions", justify="right")
+    suites.add_column("Models", justify="right")
+    suites.add_column("Mean AUC", justify="right")
+    suites.add_column("Verdict")
+    for entry in sorted(
+        report.by_suite.values(),
+        key=lambda s: -(s.mean_auc if s.mean_auc == s.mean_auc else -1),
+    ):
+        mark = {
+            "works": "[green]works[/green]",
+            "weak": "[yellow]weak[/yellow]",
+            "no signal": "[red]no signal[/red]",
+        }.get(entry.verdict, "[dim]not scorable[/dim]")
+        suites.add_row(
+            entry.suite,
+            f"{entry.n_questions:,}",
+            str(entry.n_models),
+            f"{entry.mean_auc:.3f}" if entry.mean_auc == entry.mean_auc else "-",
+            mark,
+        )
+    console.print(suites)
+    console.print(
+        "[dim]THIS is the output that matters. A router shipped from this "
+        "should be trusted on the rows marked 'works', and the ladder policy "
+        "should handle the rest - which is why the docs need this table, not "
+        "an average.[/dim]\n"
+    )
+
+    ranked = sorted(
+        (s for s in report.in_domain.values() if s.auc == s.auc),
+        key=lambda s: -s.auc,
+    )
+    if ranked:
+        models = Table(title="Per model, in-domain (best and worst)")
+        models.add_column("Model")
+        models.add_column("Trained on", justify="right")
+        models.add_column("Base rate", justify="right")
+        models.add_column("AUC", justify="right")
+        for entry in ranked[:6] + (ranked[-4:] if len(ranked) > 10 else []):
+            models.add_row(
+                entry.model,
+                f"{entry.n_train:,}",
+                f"{entry.base_rate:.0%}",
+                f"[{colour_for(entry.auc)}]{entry.auc:.3f}"
+                f"[/{colour_for(entry.auc)}]",
+            )
+        console.print(models)
+        console.print(
+            "[dim]Read AUC next to the base rate: a model right 95% of the "
+            "time has little left to predict.[/dim]"
+        )
+
+    console.print(f"\n[bold]{report.verdict()}[/bold]")
+
+    if out:
+        pd.DataFrame(
+            [
+                {
+                    "suite": s.suite,
+                    "questions": s.n_questions,
+                    "models": s.n_models,
+                    "mean_auc": s.mean_auc,
+                    "verdict": s.verdict,
+                }
+                for s in report.by_suite.values()
+            ]
+        ).to_csv(out, index=False)
+        console.print(f"[green]Written[/green] {out}")
+
+
 @bench_cli.command("sla")
 def bench_sla(
     source: str = typer.Argument(..., help="Cached source (needs per-query latency)."),
