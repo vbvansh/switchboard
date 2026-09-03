@@ -59,6 +59,19 @@ class RoutingDecision:
     reason: str = ""
     features: dict = field(default_factory=dict)
 
+    #: True when the strategy had no usable opinion and the caller should fall
+    #: back to something simpler.
+    #
+    # This is the "I don't know" the project has been missing. A router that
+    # always returns a confident answer is not confident - it is silent about
+    # its own ignorance, which is exactly how the C.4 failure went unnoticed:
+    # predictions clustered in a narrow band, everything went to the cheapest
+    # model, and nothing in the logs said why.
+    #
+    # `model` is still populated when this is set, so a caller that ignores the
+    # flag gets a sane answer rather than a crash.
+    abstained: bool = False
+
 
 class RoutingStrategy(ABC):
     """Chooses a model for a request."""

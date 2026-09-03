@@ -1,0 +1,33 @@
+suite,questions,models,mean_auc,verdict
+llmrouterbench/aime,15,0,,not scorable
+llmrouterbench/arc-agi,104,17,0.4691028736670425,no signal
+llmrouterbench/arenahard_creative_writing,69,29,0.5015172247814427,no signal
+llmrouterbench/arenahard_math,76,31,0.526618432826382,no signal
+llmrouterbench/bbh,276,20,0.7301507168712698,works
+llmrouterbench/emorynlp,187,20,0.5205278859700265,no signal
+llmrouterbench/finqa,256,20,0.6139097618571163,weak
+llmrouterbench/gpqa,57,38,0.5555203748588277,no signal
+llmrouterbench/humaneval,35,22,0.6085400727565802,weak
+llmrouterbench/kandk,170,20,0.6794975558026917,works
+llmrouterbench/korbench,325,20,0.850447020752289,works
+llmrouterbench/livecodebench,280,38,0.764108582308678,works
+llmrouterbench/livemathbench,32,35,0.6665074923200127,works
+llmrouterbench/math500,118,20,0.6302791457661131,weak
+llmrouterbench/mathbench,30,20,0.6213595505366633,weak
+llmrouterbench/mbpp,265,20,0.6181241622056389,weak
+llmrouterbench/medqa,314,20,0.5247970614511511,no signal
+llmrouterbench/meld,289,20,0.5369387991210736,no signal
+llmrouterbench/mmlupro,997,38,0.6491210457872397,weak
+llmrouterbench/tau2,73,12,0.6759198376737646,works
+llmrouterbench/winogrande,297,20,0.48457787749426834,no signal
+xroutebench/arc_challenge,241,18,0.4969138988463788,no signal
+xroutebench/boolq,105,18,0.5639665154756539,no signal
+xroutebench/commonsense_qa,113,18,0.5006605761303083,no signal
+xroutebench/gsm8k,225,18,0.6290170639139121,weak
+xroutebench/hellaswag,117,18,0.5584870912918236,no signal
+xroutebench/human_eval,36,11,0.5850607481953268,weak
+xroutebench/mbpp,195,18,0.6495126914220672,weak
+xroutebench/mmlu,245,18,0.6317804598655624,weak
+xroutebench/mmlu_pro,154,18,0.7004435718499793,works
+xroutebench/openbook_qa,239,18,0.48279303316491007,no signal
+xroutebench/squad,112,18,0.5747031002990924,weak

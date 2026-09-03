@@ -112,6 +112,9 @@ class BroadReport:
     n_suites: int = 0
     held_out_suites: list[str] = field(default_factory=list)
     features: str = ""
+    #: Trained on the TRAINING split only. Kept so the CLI can report against
+    #: it, but never the thing that gets shipped - see `retrain_on_everything`.
+    predictor: object | None = None
     in_domain: dict[str, ModelScore] = field(default_factory=dict)
     transfer: dict[str, ModelScore] = field(default_factory=dict)
     by_suite: dict[str, SuiteScore] = field(default_factory=dict)
@@ -399,7 +402,33 @@ def run(
         n_suites=int(rows["benchmark"].nunique()),
         held_out_suites=held,
         features=predictor.extractor.describe(),
+        predictor=predictor,
         in_domain=score(predictor, in_domain_test, counts),
         transfer=score(predictor, transfer_test, counts),
         by_suite=score_by_suite(predictor, in_domain_test),
     )
+
+
+def retrain_on_everything(
+    rows: pd.DataFrame, features: str = "tfidf", seed: int = 0
+):
+    """Refit on ALL the data, for the artifact that actually ships.
+
+    Two different jobs, and conflating them is a classic way to publish a
+    number nobody can reproduce:
+
+        MEASURING   train on part, score on the rest. The held-out score is
+                    the only honest description of how well it works.
+        SHIPPING    train on everything. More data is strictly better for the
+                    artifact, and there is nothing left to score it against -
+                    which is fine, because the score already came from the
+                    measuring run.
+
+    So the numbers in the coverage table come from the split run, and the file
+    users load comes from this one. The metadata records both facts.
+    """
+    capped = _cap(rows, seed)
+    models = eligible_models(capped)
+    if len(models) < 2:
+        raise ValueError("Not enough models with balanced data to ship.")
+    return fit(capped, models, features, seed)

@@ -38,12 +38,25 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
+from switchboard import paths
 from switchboard.catalog import ModelCatalog
 from switchboard.routing.artifact import RouterMetadata
 from switchboard.routing.base import RoutingContext, RoutingDecision, RoutingStrategy
 
 logger = logging.getLogger(__name__)
+
+
+def shipped_router_path() -> Path:
+    """A router bundled inside the package, if one was built.
+
+    Written by `switchboard bench train-broad --save` and committed as package
+    data. It knows public benchmark model names, so it only drives a catalog
+    whose models declare a `benchmark_alias` - which is why `switchboard router
+    info` reports what actually mapped.
+    """
+    return paths.PACKAGE_ROOT / "router.joblib"
 
 #: Per-request limits, sent as headers so the body stays a valid OpenAI request.
 HEADER_MAX_LATENCY = "x-switchboard-max-latency"
@@ -140,6 +153,7 @@ class LiveRouter(RoutingStrategy):
         costs: dict[str, float],
         latencies: dict[str, float] | None = None,
         default_min_quality: float = 0.5,
+        min_spread: float = 0.0,
     ) -> None:
         self.predictor = predictor
         self.metadata = metadata
@@ -147,6 +161,8 @@ class LiveRouter(RoutingStrategy):
         self.costs = costs
         self.latencies = latencies or {}
         self.default_min_quality = default_min_quality
+        # Below this spread the router says it has no opinion. See choose().
+        self.min_spread = min_spread
 
     @property
     def enabled(self) -> bool:
@@ -162,6 +178,32 @@ class LiveRouter(RoutingStrategy):
     ) -> RoutingDecision:
         limits = limits or RequestLimits()
         probabilities = self.predictor.predict_one(context.prompt_text)
+
+        # THE HONESTY CHECK. If every model gets roughly the same score, the
+        # router has not distinguished them - it has no opinion, and acting on
+        # one would be inventing a decision.
+        #
+        # This is the failure C.4 found and could not see: on prompts unlike
+        # its training data the router returned 0.67-0.87 for everything, sent
+        # it all to the cheapest model, and wrote a reason implying judgement.
+        # Saying "I do not know" makes that visible in every ledger row.
+        spread = self._spread(probabilities)
+        if spread < self.min_spread:
+            cheapest = min(
+                self.model_map.values(),
+                key=lambda m: self.costs.get(m, float("inf")),
+            )
+            return RoutingDecision(
+                model=cheapest,
+                strategy=self.name,
+                abstained=True,
+                reason=(
+                    f"predictions span only {spread:.3f} across "
+                    f"{len(probabilities)} models - no usable discrimination "
+                    "on this prompt, so no routing decision was made"
+                ),
+                features={"probabilities": probabilities, "spread": spread},
+            )
 
         # Candidates are catalog models, cheapest first.
         candidates = [
@@ -217,6 +259,20 @@ class LiveRouter(RoutingStrategy):
             ),
         )
 
+    @staticmethod
+    def _spread(probabilities: dict[str, float]) -> float:
+        """How far apart the best and worst predictions are.
+
+        Deliberately the raw range rather than a variance or an entropy. The
+        question being asked is "did this router separate the models at all",
+        and the gap between the top and bottom answers it directly - which
+        also makes the number in the ledger reason readable by a human.
+        """
+        if len(probabilities) < 2:
+            return 0.0
+        values = list(probabilities.values())
+        return max(values) - min(values)
+
     def _within_limits(self, model: str, limits: RequestLimits) -> bool:
         if (
             limits.max_cost_usd is not None
@@ -242,15 +298,34 @@ def build_router(
     from switchboard.config import settings
     from switchboard.routing.artifact import ArtifactError, load
 
-    path = path or settings.router_path
+    # Best available wins, in this order:
+    #
+    #   1. the operator's own router, trained on their traffic and their models
+    #   2. a broad router shipped inside the package, trained across 40 public
+    #      benchmark suites - which is what makes a FRESH INSTALL route on its
+    #      first request instead of waiting for a month of feedback
+    #
+    # A missing artifact at either level is normal, not an error. Whatever is
+    # left - eventually the ladder policy - serves the request.
+    attempts = [(path or settings.router_path, "your trained router")]
     if not path:
-        logger.info("No router configured; `auto` will use default_model.")
-        return None
+        attempts.append((str(shipped_router_path()), "the shipped router"))
 
-    try:
-        predictor, metadata = load(path)
-    except ArtifactError as exc:
-        logger.warning("Routing disabled: %s", exc)
+    predictor = metadata = None
+    for candidate, describe in attempts:
+        if not candidate or not Path(candidate).exists():
+            continue
+        try:
+            predictor, metadata = load(candidate)
+            logger.info("Loaded %s from %s", describe, candidate)
+            break
+        except ArtifactError as exc:
+            logger.warning("Could not load %s: %s", describe, exc)
+
+    if predictor is None or metadata is None:
+        logger.info(
+            "No usable router; `auto` falls back to the ladder policy."
+        )
         return None
 
     model_map = build_model_map(catalog, metadata.models, available)
@@ -278,6 +353,7 @@ def build_router(
         costs=costs,
         latencies=latencies,
         default_min_quality=settings.router_min_quality,
+        min_spread=settings.router_min_spread,
     )
     if router.enabled:
         logger.info(

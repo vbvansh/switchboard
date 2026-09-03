@@ -55,6 +55,15 @@ class RouterMetadata:
     label_source: str = "benchmark"
     #: For live-trained routers: the span of traffic it learned from.
     period: str = ""
+    #: suite -> held-out AUC, for a router trained across many benchmark
+    #: suites. THE table an operator needs: a broad router is genuinely useful
+    #: on some kinds of question and no better than guessing on others, and an
+    #: average over the two hides exactly the rows that matter.
+    coverage: dict[str, float] = field(default_factory=dict)
+    #: Mean AUC measured WITHIN each suite, as opposed to across them mixed
+    #: together. The gap between the two says whether the router is picking a
+    #: model by topic or genuinely telling hard questions from easy ones.
+    within_suite_auc: float = float("nan")
     #: Benchmark model names the router can choose between.
     models: list[str] = field(default_factory=list)
     n_train_questions: int = 0

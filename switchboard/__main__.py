@@ -1677,6 +1677,14 @@ def bench_train_broad(
     features: str = typer.Option("tfidf", help="surface | tfidf | embedding."),
     seed: int = typer.Option(0, help="Seed for the splits and classifiers."),
     out: str = typer.Option("", help="Write the per-suite table as CSV."),
+    save: bool = typer.Option(
+        False,
+        "--save",
+        help="Refit on ALL data and write an artifact the server can load.",
+    ),
+    save_to: str = typer.Option(
+        "", help="Where to write it. Defaults to inside the package."
+    ),
 ) -> None:
     """Train ONE router across every suite, and report where it actually works.
 
@@ -1840,6 +1848,49 @@ def bench_train_broad(
         )
 
     console.print(f"\n[bold]{report.verdict()}[/bold]")
+
+    if save:
+        from switchboard.routing import artifact as artifact_mod
+        from switchboard.routing.live import shipped_router_path
+
+        console.print(
+            "\n[bold]Refitting on ALL the data for the shipped artifact "
+            "...[/bold]"
+        )
+        console.print(
+            "[dim]The numbers above came from held-out data and stay the "
+            "honest description of how well this works. The file itself is "
+            "trained on everything, because more data is strictly better for "
+            "the artifact and there is nothing left to score it against.[/dim]"
+        )
+        shipped = broad.retrain_on_everything(rows, features, seed)
+
+        metadata = artifact_mod.RouterMetadata(
+            source="public benchmarks, all suites",
+            benchmark=f"{report.n_suites} suites",
+            features=shipped.extractor.describe(),
+            label_source="benchmark",
+            models=list(shipped.models),
+            n_train_questions=report.n_questions,
+            mean_auc=report.in_domain_auc,
+            within_suite_auc=report.within_suite_auc,
+            coverage={
+                name: entry.mean_auc
+                for name, entry in report.by_suite.items()
+                if entry.mean_auc == entry.mean_auc
+            },
+        )
+
+        destination = Path(save_to) if save_to else shipped_router_path()
+        artifact_mod.save(destination, shipped, metadata)
+        console.print(f"[green]Saved[/green] {destination}")
+        console.print(
+            f"  {len(shipped.models)} models, "
+            f"{len(metadata.coverage)} suites scored\n"
+            "  Loaded automatically when no router of your own exists.\n"
+            "  [dim]It knows BENCHMARK model names - run `switchboard router "
+            "info` to see which of your models it can actually drive.[/dim]"
+        )
 
     if out:
         pd.DataFrame(
@@ -2364,8 +2415,18 @@ def router_info(
 ) -> None:
     """Show what a router was trained on, and which local models it can drive."""
     from switchboard.routing import artifact as artifact_mod
+    from switchboard.routing.live import shipped_router_path
 
-    target = Path(path) if path else Path(settings.router_path)
+    if path:
+        target = Path(path)
+    elif Path(settings.router_path).exists():
+        target = Path(settings.router_path)
+    else:
+        # Same order the server uses: your own router, then the one bundled
+        # with the package. Inspecting a different file to the one that will
+        # actually be loaded would be worse than useless.
+        target = shipped_router_path()
+
     metadata = artifact_mod.read_metadata(target)
 
     if metadata is None:
@@ -2387,7 +2448,37 @@ def router_info(
         if metadata.mean_auc >= 0.55
         else "red"
     )
-    console.print(f"  held-out AUC: [{colour}]{metadata.mean_auc:.3f}[/{colour}]\n")
+    console.print(f"  held-out AUC: [{colour}]{metadata.mean_auc:.3f}[/{colour}]")
+
+    within = metadata.within_suite_auc
+    if within == within:  # not NaN
+        console.print(
+            f"  within-suite AUC: {within:.3f} "
+            "[dim](telling hard from easy, rather than topic from topic)[/dim]"
+        )
+    console.print("")
+
+    if metadata.coverage:
+        table = Table(title="What this router can and cannot judge")
+        table.add_column("Kind of question")
+        table.add_column("AUC", justify="right")
+        table.add_column("Verdict")
+        for name, auc in sorted(metadata.coverage.items(), key=lambda kv: -kv[1]):
+            if auc >= 0.65:
+                mark = "[green]trust it[/green]"
+            elif auc >= 0.57:
+                mark = "[yellow]weak[/yellow]"
+            else:
+                mark = "[red]no signal - let the ladder decide[/red]"
+            table.add_row(name, f"{auc:.3f}", mark)
+        console.print(table)
+        console.print(
+            "[dim]A broad router is genuinely useful on some kinds of question "
+            "and no better than guessing on others. At request time it cannot "
+            "tell which it is looking at, so when its predictions are too close "
+            "together it abstains and the ladder decides instead - see "
+            "SWITCHBOARD_ROUTER_MIN_SPREAD.[/dim]\n"
+        )
 
     _report_router_mapping(metadata.models)
 

@@ -51,6 +51,7 @@ subject to per-request latency, cost and quality limits. What works today:
 | I | Feedback endpoint and training on your own traffic | done |
 | J.1 | Installable as a package, with files in the right places | done |
 | J.2 | Cold start: ladder routing + answer verification, no training | done |
+| J.3 | A router trained across all 40 suites, with honest abstention | done |
 
 **Documentation:** [Architecture](docs/ARCHITECTURE.md) - how it is put
 together and what happens to one request. [Results](docs/RESULTS.md) -
@@ -1108,6 +1109,95 @@ scored **84.0% against 86.8%** for always using the best model, at **1/20th of
 the price** — before any escalation. Escalation recovers some of that gap on the
 requests where failure is visible. It cannot recover the rest, and nothing here
 pretends otherwise.
+
+## The three routers, and which one answers
+
+Best available wins:
+
+```
+1. your own router        trained on your feedback        needs traffic
+2. the shipped router     trained across 40 suites        works on install
+3. the ladder             cheapest model that fits        always available
+```
+
+### What the broad router actually learned
+
+Trained across all 40 benchmark suites — 695,965 answers, 19,271 questions, 57
+models — and measured with 8 whole suites held out:
+
+| | Mean AUC | |
+|---|---|---|
+| In-domain (new questions, seen suites) | 0.756 | |
+| Within one suite (same kind of question) | 0.600 | |
+| Transfer (whole unseen suites) | 0.651 | |
+
+**Breadth helped.** Trained on 13 suites those figures were 0.803 / 0.540 /
+0.594 — so within-suite and transfer both improved with more suites. (Different
+suites were held out in each run, so this is suggestive rather than controlled.)
+
+**But read the first two rows together.** The gap says what kind of routing this
+is:
+
+> It has learned **which model suits which kind of question**. It has largely
+> not learned **which questions of that kind are hard.**
+
+Topic routing, not difficulty routing. That is a smaller claim than the 88.3%
+headline, and it is a real one.
+
+### It works on some kinds of question and not others
+
+```
+WORKS                                  NO SIGNAL
+  korbench       0.850  reasoning        winogrande        0.485  commonsense
+  livecodebench  0.764  code             openbook_qa       0.483  commonsense
+  bbh            0.730  reasoning        arc_challenge     0.497  commonsense
+  mmlu_pro       0.700  hard MCQ         creative_writing  0.502  creative
+  kandk          0.679  logic            emorynlp          0.521  emotion
+  tau2           0.676  agentic          medqa             0.525  knowledge
+  livemathbench  0.667  maths            arc-agi           0.469  abstract
+```
+
+Reasoning, code and maths: yes. Commonsense, emotion, creative work and factual
+lookup: no. `switchboard router info` prints the full table for whichever
+artifact you have.
+
+### So it says "I don't know"
+
+At request time the router cannot tell which kind of question it is looking at.
+So when its predictions are all bunched together — no model meaningfully ahead
+of another — **it abstains and the ladder decides**:
+
+```
+routing_reason: "predictions span only 0.021 across 4 models - no usable
+                 discrimination on this prompt, so no routing decision was
+                 made; ladder chose qwen2.5:1.5b"
+```
+
+This is the fix for the Phase C.4 failure. Back then the router returned
+0.67–0.87 for everything, sent it all to the cheapest model, and wrote a reason
+implying a judgement had been made. It was not wrong — it was **silent about
+knowing nothing**, which is worse, because nothing in the logs said so.
+
+Now "the router abstained on 80% of your traffic" is a number you can look at.
+Tune with `SWITCHBOARD_ROUTER_MIN_SPREAD`, or set it to 0 to disable.
+
+### Building the shipped artifact
+
+```powershell
+python -m switchboard bench train-broad all --holdout-suites 8 --save
+python -m switchboard router info
+```
+
+The reported numbers come from the **held-out** run; the saved file is refit on
+**everything**, because more data is better for the artifact and the honest
+score already came from the split. Both facts are recorded in the metadata.
+
+**The coverage limit worth knowing.** The shipped router knows the 57 models in
+the benchmark data — which is good for open-weight models and thin for
+commercial ones. There is no `gpt-4o-mini`, no `gpt-4o`, no Claude Haiku. Models
+it does not know fall through to the ladder. `benchmark_alias` in
+`providers.yaml` lets you nominate a stand-in; `switchboard router info` shows
+what mapped.
 
 ## Licence
 

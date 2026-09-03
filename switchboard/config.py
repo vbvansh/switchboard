@@ -49,6 +49,20 @@ class Settings(BaseSettings):
     # per request with the X-Switchboard-Min-Quality header.
     router_min_quality: float = 0.5
 
+    # Minimum spread between the best and worst predicted model before the
+    # router is allowed to act on its own prediction.
+    #
+    # Measured in C.4: shown a prompt unlike its training data, the router
+    # returned 0.67 to 0.87 for EVERY model - no discrimination at all, and it
+    # said nothing about that. Everything went to the cheapest model and the
+    # logs implied a decision had been made.
+    #
+    # Below this spread the router abstains and the ladder policy decides,
+    # which is the same outcome with an honest reason attached - and it makes
+    # "the router abstained on 80% of your traffic" a visible fact rather than
+    # a silent one. Set to 0 to disable abstention.
+    router_min_spread: float = 0.08
+
     # --- Response cache -----------------------------------------------------
     # Identical requests are answered from memory for nothing. Set entries to 0
     # to switch it off. Only deterministic, non-streaming requests qualify.

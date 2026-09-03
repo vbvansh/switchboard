@@ -192,9 +192,23 @@ def _resolve_model(
         )
 
     limits = RequestLimits.from_headers(request.headers)
-    decision = router.choose(
-        RoutingContext(messages=payload.get("messages") or []), limits
-    )
+    context = RoutingContext(messages=payload.get("messages") or [])
+    decision = router.choose(context, limits)
+
+    if getattr(decision, "abstained", False):
+        # The router looked and had no opinion - every model scored about the
+        # same, so acting on the difference would be inventing a decision.
+        # Hand it to the ladder, and keep the router's reason so the ledger
+        # records WHY nothing was decided rather than implying something was.
+        ladder = getattr(request.app.state, "ladder", None)
+        if ladder is not None:
+            fallback = ladder.choose(context, limits)
+            if not explicit:
+                return (
+                    fallback.model,
+                    f"{decision.reason}; ladder chose {fallback.model}",
+                    None,
+                )
 
     if settings.shadow_mode:
         # THE POINT OF SHADOW MODE: the decision is recorded and then ignored.
