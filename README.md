@@ -14,6 +14,37 @@ speaks that format — Ollama, OpenAI, Groq, OpenRouter, Together, vLLM, LM Stud
 on `SWITCHBOARD_LOCAL_ONLY=true`, and it will refuse to start if any configured
 provider is off-machine.
 
+## Install
+
+```powershell
+pip install switchboard-router
+switchboard init
+switchboard serve
+```
+
+`init` asks which providers you have, **checks each key works before writing
+anything**, discovers the models behind it, writes a catalog that loads, sets up
+the database and prints your first API key.
+
+Then change one line in your application:
+
+```python
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="sk-switchboard-...")
+```
+
+It routes on the **first request** — no training, no waiting for traffic.
+
+```powershell
+switchboard where          # which files it is using
+switchboard check          # what it can actually serve
+switchboard router info    # which questions the router can judge
+```
+
+**It will not invent a price.** OpenRouter publishes real ones and they come
+back ready to use. For providers that publish none you are asked, and anything
+you skip is written commented out — so the catalog still loads and the gap is
+visible rather than silently wrong.
+
 ## Status
 
 `model: "auto"` routes to the cheapest model predicted to answer correctly,
@@ -52,11 +83,15 @@ subject to per-request latency, cost and quality limits. What works today:
 | J.1 | Installable as a package, with files in the right places | done |
 | J.2 | Cold start: ladder routing + answer verification, no training | done |
 | J.3 | A router trained across all 40 suites, with honest abstention | done |
+| J.4 | `switchboard init` — setup without editing YAML | done |
+| J.5 | A password on the dashboard | done |
+| J.6 | Publishable to PyPI | done |
 
 **Documentation:** [Architecture](docs/ARCHITECTURE.md) - how it is put
 together and what happens to one request. [Results](docs/RESULTS.md) -
 every measured number, and what each one does not prove.
 [Deploy](DEPLOY.md) - putting it on a public URL.
+[Releasing](RELEASING.md) - publishing to PyPI.
 
 ## Why this exists
 
@@ -1198,6 +1233,24 @@ commercial ones. There is no `gpt-4o-mini`, no `gpt-4o`, no Claude Haiku. Models
 it does not know fall through to the ladder. `benchmark_alias` in
 `providers.yaml` lets you nominate a stand-in; `switchboard router info` shows
 what mapped.
+
+## Before you put it on a public URL
+
+```
+SWITCHBOARD_DASHBOARD_PASSWORD=something-long
+```
+
+`/dashboard` is open by default, which is right on a laptop. It shows spend per
+developer **by name** — no prompt text and no API keys, that stays true, but
+"who is spending what" is not for anyone who finds the link.
+
+HTTP Basic, so the browser prompts for it: no login page, no cookie, no session
+store. Any username works; only the password is checked, in constant time. Put
+it behind the HTTPS every path in [DEPLOY.md](DEPLOY.md) terminates anyway.
+
+`/metrics` and the health endpoints stay open deliberately — they carry no
+prompt text, no keys and no user names, and a scrape endpoint that needs
+credentials is one nobody gets round to configuring.
 
 ## Licence
 

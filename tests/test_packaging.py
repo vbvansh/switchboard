@@ -42,6 +42,21 @@ def test_the_project_can_actually_be_built() -> None:
     assert MANIFEST["build-system"]["requires"]
 
 
+def test_the_version_has_exactly_one_source() -> None:
+    """Three files once held three different answers - 0.1.0, 0.3.0 and 0.4.0 -
+    and nothing noticed until a release check compared them. A wrong version in
+    a published package cannot be fixed: PyPI never reuses a number."""
+    import switchboard
+    from switchboard.api import app
+
+    assert "version" in MANIFEST["project"].get("dynamic", [])
+    assert "version" not in MANIFEST["project"], "a literal version has crept back"
+    assert MANIFEST["tool"]["setuptools"]["dynamic"]["version"] == {
+        "attr": "switchboard.__version__"
+    }
+    assert app.version == switchboard.__version__
+
+
 def test_the_switchboard_command_is_declared() -> None:
     """This single line is what puts `switchboard` on a user's PATH."""
     assert MANIFEST["project"]["scripts"]["switchboard"] == (

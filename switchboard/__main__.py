@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import typer
@@ -10,7 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from switchboard import schema
-from switchboard.catalog import CatalogError, ModelCatalog
+from switchboard.catalog import CatalogError, ModelCatalog, expand_env
 from switchboard.config import settings
 from switchboard.ledger import Database, LedgerError, LedgerService
 from switchboard.providers import LocalOnlyViolation, ProviderPool
@@ -99,6 +101,446 @@ def db_stamp_baseline() -> None:
     console.print(
         f"[green]Stamped[/green] {settings.database_url} at revision 0001.\n"
         "Now run [cyan]switchboard db upgrade[/cyan] to apply anything newer."
+    )
+
+
+# --- Setup -----------------------------------------------------------------
+
+
+def _validate_and_discover(spec: dict, key: str | None):
+    """Check a key works, and ask the provider what it has. Returns models.
+
+    Validating BEFORE writing anything is the point. A wizard that accepts a
+    typo and writes it to disk moves the failure to the user's first request,
+    where the error says "401" and not "you pasted the wrong key".
+    """
+    import asyncio
+
+    from switchboard import discovery
+    from switchboard.catalog import ProviderSpec
+    from switchboard.providers import ADAPTERS
+
+    provider_spec = ProviderSpec(
+        id=spec["id"],
+        type=spec["type"],
+        base_url=expand_env(spec["base_url"]),
+        enabled=True,
+        api_key_env=spec["api_key_env"],
+    )
+    if spec["api_key_env"] and key:
+        os.environ[spec["api_key_env"]] = key
+
+    adapter = ADAPTERS[spec["type"]]
+
+    async def fetch():
+        provider = adapter(provider_spec)
+        try:
+            response = await provider.list_models()
+            return response.status_code, response.content
+        finally:
+            await provider.aclose()
+
+    status, body = asyncio.run(fetch())
+    if status >= 400:
+        raise RuntimeError(f"the provider returned HTTP {status}")
+    return discovery.parse(spec["type"], provider_spec.base_url, body)
+
+
+@cli.command()
+def init(
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite an existing providers.yaml."
+    ),
+    local_only: bool = typer.Option(
+        False, "--local-only", help="Skip the questions; configure local Ollama."
+    ),
+) -> None:
+    """Set Switchboard up: connect your models and get an API key.
+
+    Asks which providers you have, checks each key actually works before
+    writing anything, discovers the models behind it, and produces a catalog
+    that loads. Then it creates the database and your first API key.
+
+    It will not invent a price. Providers that publish prices (OpenRouter) come
+    back ready to use; for the rest you are asked, and anything you skip is
+    written commented out so the catalog still loads and the gap is visible.
+    """
+    from switchboard import bootstrap, paths
+
+    target = paths.providers_file()
+    console.print("[bold]Switchboard setup[/bold]\n")
+    console.print(f"Config will be written to [cyan]{target}[/cyan]")
+    console.print(f"Data (ledger, router) lives in [cyan]{paths.data_dir()}[/cyan]\n")
+
+    if target.exists() and not force:
+        console.print(
+            f"[yellow]{target} already exists.[/yellow] "
+            "Re-run with [cyan]--force[/cyan] to replace it, or edit it by hand."
+        )
+        raise typer.Exit(code=1)
+
+    chosen: list[bootstrap.ChosenProvider] = []
+
+    # --- Local models -------------------------------------------------------
+    ollama = bootstrap.PROVIDERS_BY_ID["ollama-local"]
+    console.print("Looking for a local Ollama ...")
+    try:
+        found = _validate_and_discover(ollama, None)
+    except Exception as exc:
+        found = []
+        console.print(f"[dim]  none reachable ({exc})[/dim]")
+
+    if found:
+        console.print(f"[green]  found {len(found)} local models[/green]")
+        picked = (
+            [m.id for m in found]
+            if local_only
+            else _pick_models([m.id for m in found], "local")
+        )
+        models = []
+        for index, model_id in enumerate(picked):
+            spec = next(m for m in found if m.id == model_id)
+            in_price, out_price, tier, stands_for = bootstrap.simulated_pricing(
+                index, len(picked)
+            )
+            models.append(
+                bootstrap.ChosenModel(
+                    id=model_id,
+                    provider_id="ollama-local",
+                    input_per_mtok=in_price,
+                    output_per_mtok=out_price,
+                    context_window=spec.context_window,
+                    tier=tier,
+                    stands_in_for=stands_for,
+                )
+            )
+        if models:
+            chosen.append(bootstrap.ChosenProvider("ollama-local", models))
+            console.print(
+                "[dim]  Local models are free. Each is priced as the commercial "
+                "model it stands in for, so budgets and savings mean something. "
+                "No real money is involved.[/dim]"
+            )
+
+    # --- Remote providers ---------------------------------------------------
+    if not local_only:
+        chosen.extend(_ask_remote_providers(bootstrap))
+
+    if not chosen:
+        console.print(
+            "\n[yellow]No providers configured.[/yellow] Switchboard needs at "
+            "least one. Start Ollama, or re-run and paste a provider key."
+        )
+        raise typer.Exit(code=1)
+
+    # --- Write it -----------------------------------------------------------
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(bootstrap.render_catalog(chosen), encoding="utf-8")
+    console.print(f"\n[green]Written[/green] {target}")
+    console.print(f"  {bootstrap.summarise(chosen)}")
+
+    ladder = bootstrap.build_ladder(chosen)
+    if len(ladder) >= 2:
+        console.print(f"  Ladder, cheapest first: [cyan]{' -> '.join(ladder)}[/cyan]")
+    elif ladder:
+        console.print(
+            "  [yellow]Only one priced model.[/yellow] Routing needs at least "
+            "two to choose between; everything will go to that one."
+        )
+
+    # --- Database and first key --------------------------------------------
+    paths.ensure_data_dir()
+    console.print("\nSetting up the ledger ...")
+    schema.upgrade(settings.database_url)
+
+    name = (
+        "admin"
+        if local_only
+        else typer.prompt("\nName for your first user", default="admin")
+    )
+    try:
+        created = _ledger().create_user(name, monthly_budget_usd=50.0)
+    except LedgerError as exc:
+        console.print(f"[yellow]{exc}[/yellow] Skipping user creation.")
+        created = None
+
+    console.print("\n[bold green]Ready.[/bold green]")
+    if created:
+        console.print(
+            f"\n  Your API key: [bold cyan]{created.api_key}[/bold cyan]\n"
+            "  [yellow]Copy it now - only its hash is stored, so it cannot be "
+            "shown again.[/yellow]"
+        )
+
+    shown_key = created.api_key if created else "<your key>"
+    console.print(
+        "\n  Start it:   [cyan]switchboard serve[/cyan]\n"
+        "  Then point any OpenAI client at it:\n\n"
+        '    client = OpenAI(base_url="http://localhost:8000/v1",\n'
+        f'                    api_key="{shown_key}")\n\n'
+        "  Where things are:  [cyan]switchboard where[/cyan]\n"
+        "  What it can serve: [cyan]switchboard check[/cyan]"
+    )
+
+
+def _pick_models(available: list[str], label: str) -> list[str]:
+    """Ask which models to use, defaulting to all of them."""
+    console.print(f"\n  Available {label} models:")
+    for index, model_id in enumerate(available, start=1):
+        console.print(f"    {index}. {model_id}")
+    raw = typer.prompt(
+        "  Which to use? (numbers separated by commas, or Enter for all)",
+        default="",
+        show_default=False,
+    )
+    if not raw.strip():
+        return available
+
+    picked = []
+    for part in raw.replace(" ", "").split(","):
+        if part.isdigit() and 1 <= int(part) <= len(available):
+            picked.append(available[int(part) - 1])
+    return picked or available
+
+
+def _ask_remote_providers(bootstrap) -> list:
+    """Walk the known remote providers, validating each key before accepting."""
+    chosen = []
+    remote = [s for s in bootstrap.KNOWN_PROVIDERS if s["api_key_env"]]
+
+    console.print("\n[bold]Remote providers[/bold]")
+    console.print("[dim]Press Enter to skip any you do not have.[/dim]")
+
+    for spec in remote:
+        console.print(f"\n  [cyan]{spec['label']}[/cyan]")
+        console.print(f"  [dim]{spec['note']}[/dim]")
+
+        existing = os.environ.get(spec["api_key_env"] or "")
+        prompt = f"  {spec['api_key_env']}"
+        if existing:
+            prompt += " (found in your environment; Enter to use it)"
+        key = typer.prompt(prompt, default="", show_default=False, hide_input=True)
+        key = key.strip() or existing
+        if not key:
+            continue
+
+        console.print("  checking ...")
+        try:
+            found = _validate_and_discover(spec, key)
+        except Exception as exc:
+            console.print(f"  [red]that key did not work: {exc}[/red]")
+            continue
+
+        console.print(f"  [green]valid - {len(found)} models[/green]")
+        contains = typer.prompt(
+            "  Filter by name (e.g. 'claude'), or Enter for all",
+            default="",
+            show_default=False,
+        ).strip()
+        if contains:
+            found = [m for m in found if contains.lower() in m.id.lower()]
+
+        picked_ids = _pick_models([m.id for m in found][:40], spec["id"])
+        models = bootstrap.from_discovered(
+            [m for m in found if m.id in set(picked_ids)], spec["id"]
+        )
+
+        for model in models:
+            if model.priced:
+                continue
+            console.print(
+                f"    [yellow]{model.id}[/yellow] has no published price. "
+                "Enter it, or press Enter to write it commented out."
+            )
+            raw_in = typer.prompt("      $ per million input tokens", default="")
+            raw_out = typer.prompt("      $ per million output tokens", default="")
+            try:
+                model.input_per_mtok = float(raw_in)
+                model.output_per_mtok = float(raw_out)
+            except ValueError:
+                model.input_per_mtok = model.output_per_mtok = None
+
+        if models:
+            chosen.append(bootstrap.ChosenProvider(spec["id"], models))
+
+    return chosen
+
+
+@cli.command("release-check")
+def release_check(
+    skip_tests: bool = typer.Option(
+        False, "--skip-tests", help="Skip the test suite (it is the slow part)."
+    ),
+) -> None:
+    """Everything that is cheap to check and expensive to get wrong.
+
+    Run before publishing. A release cannot be taken back - PyPI refuses to
+    re-upload a version number, ever, even to fix a typo. The worst outcome is
+    not a failed upload; it is a successful one that installs broken software
+    for everybody who tries it that week.
+
+    The wheel contents check is the one that earns its keep. A missing data file
+    installs perfectly cleanly and then fails on somebody else's machine: no
+    migrations means an installed copy cannot start at all, and that failure
+    reads like a database problem rather than a packaging one.
+    """
+    import shutil
+    import subprocess
+    import tomllib
+    import zipfile
+
+    from switchboard import paths
+
+    root = paths.BUNDLE_ROOT
+    failures: list[str] = []
+    notes: list[str] = []
+
+    table = Table(title="Release check")
+    table.add_column("Check")
+    table.add_column("Result")
+
+    def record(name: str, ok: bool, detail: str = "") -> None:
+        table.add_row(
+            name,
+            f"[green]ok[/green] {detail}" if ok else f"[red]FAILED[/red] {detail}",
+        )
+        if not ok:
+            failures.append(name)
+
+    # --- Version ------------------------------------------------------------
+    manifest = tomllib.loads((root / "pyproject.toml").read_text("utf-8"))
+    from switchboard import __version__ as version
+    from switchboard.api import app as api_app
+
+    # pyproject reads the version from switchboard/__init__.py, so there is one
+    # source of truth. This confirms it stayed that way: a literal `version =`
+    # creeping back in would let the two drift, and a wrong version in a
+    # published package cannot be fixed - PyPI never reuses a number.
+    record(
+        "the version has one source",
+        "version" in manifest["project"].get("dynamic", [])
+        and "version" not in manifest["project"],
+        f"{version}",
+    )
+    record(
+        "the API reports the same version",
+        version == api_app.version,
+        f"package {version}, api {api_app.version}",
+    )
+
+    # --- Git ----------------------------------------------------------------
+    try:
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        record(
+            "working tree is clean",
+            not dirty,
+            f"{len(dirty.splitlines())} uncommitted file(s)" if dirty else "",
+        )
+    except (OSError, subprocess.CalledProcessError):
+        notes.append("git not available; could not check for uncommitted changes")
+
+    # --- Lint ---------------------------------------------------------------
+    lint = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", "."],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    record("ruff", lint.returncode == 0)
+
+    # --- Tests --------------------------------------------------------------
+    if skip_tests:
+        notes.append("tests were skipped (--skip-tests)")
+    else:
+        console.print("[dim]Running the test suite ...[/dim]")
+        tests = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        summary = (tests.stdout or "").strip().splitlines()
+        record("tests", tests.returncode == 0, summary[-1][:40] if summary else "")
+
+    # --- The wheel ----------------------------------------------------------
+    build_dir = root / "dist" / "_release_check"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    console.print("[dim]Building a wheel ...[/dim]")
+    built = subprocess.run(
+        [
+            sys.executable, "-m", "pip", "wheel", ".",
+            "--no-deps", "--no-build-isolation", "-w", str(build_dir),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    record("wheel builds", built.returncode == 0)
+
+    wheels = list(build_dir.glob("*.whl")) if built.returncode == 0 else []
+    if wheels:
+        names = set(zipfile.ZipFile(wheels[0]).namelist())
+
+        # Without these an installed copy refuses to start, and the error
+        # points at the database rather than at the missing files.
+        migrations = [n for n in names if "switchboard/migrations/versions/" in n]
+        record(
+            "migrations are in the wheel",
+            len(migrations) >= 7,
+            f"{len(migrations)} scripts",
+        )
+        record("alembic.ini is in the wheel", "switchboard/alembic.ini" in names)
+        record(
+            "guardrail samples are in the wheel",
+            "switchboard/guardrail_samples.jsonl" in names,
+        )
+
+        leaked = sorted(n for n in names if n.startswith(("eval/", "tests/")))
+        record(
+            "research code stays out of the wheel",
+            not leaked,
+            f"leaked {leaked[:2]}" if leaked else "",
+        )
+
+        entry = [n for n in names if n.endswith("entry_points.txt")]
+        has_command = bool(entry) and "switchboard" in zipfile.ZipFile(
+            wheels[0]
+        ).read(entry[0]).decode()
+        record("the `switchboard` command is declared", has_command)
+
+        size_mb = wheels[0].stat().st_size / 1_000_000
+        table.add_row("wheel size", f"[dim]{size_mb:.1f} MB[/dim]")
+        if "switchboard/router.joblib" in names:
+            table.add_row("shipped router", "[green]included[/green]")
+        else:
+            notes.append(
+                "no shipped router in the wheel - build one with "
+                "`switchboard bench train-broad all --save`, or ship without "
+                "it and every install falls back to the ladder policy"
+            )
+
+    console.print(table)
+    for note in notes:
+        console.print(f"[yellow]note:[/yellow] {note}")
+
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+    if failures:
+        console.print(
+            f"\n[red]{len(failures)} check(s) failed:[/red] {', '.join(failures)}\n"
+            "Do not publish. A version number cannot be reused."
+        )
+        raise typer.Exit(code=1)
+
+    console.print(
+        f"\n[green]Ready to publish {version}.[/green]\n"
+        "  See [cyan]RELEASING.md[/cyan] - and go through TestPyPI first."
     )
 
 

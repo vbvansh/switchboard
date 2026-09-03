@@ -18,7 +18,9 @@ build-backend = "setuptools.build_meta"
 # The import name stays `switchboard`; this is the name on PyPI, where the
 # short one is taken.
 name = "switchboard-router"
-version = "0.4.0"
+# Read from switchboard/__init__.py, so the version lives in exactly one
+# place. Three files used to hold three different answers.
+dynamic = ["version"]
 description = "A self-hostable AI model router: complexity-aware routing, budget enforcement, and an auditable savings ledger."
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -86,6 +88,9 @@ Source = "https://github.com/vbvansh/switchboard"
 # "when someone types `switchboard`, import switchboard.__main__ and call cli()".
 switchboard = "switchboard.__main__:cli"
 
+[tool.setuptools.dynamic]
+version = { attr = "switchboard.__version__" }
+
 [tool.setuptools.packages.find]
 # Ship the application only. `eval/` and `tests/` stay out of the wheel: the
 # research harness is not something a server should carry.
@@ -97,10 +102,21 @@ include = ["switchboard*"]
 #   migrations  -> the server refuses to start against an unknown schema
 #   alembic.ini -> the migration runner cannot configure itself
 #   *.jsonl     -> `switchboard guardrails calibrate` has nothing to read
+#
+# router.joblib is the router trained across all 40 benchmark suites, and its
+# .json sidecar carries the coverage table `switchboard router info` prints.
+# Without them a fresh install has no router at all and every request falls to
+# the ladder policy - which works, but is the weaker product.
+#
+# It holds fitted model weights, not the benchmark datasets: about 1.5 MB of
+# derived statistics, which is a different thing from redistributing 6.6 GB of
+# recorded model answers that are not ours to redistribute.
 switchboard = [
     "alembic.ini",
     "*.jsonl",
     "*.yaml",
+    "router.joblib",
+    "router.json",
     "migrations/*.py",
     "migrations/*.mako",
     "migrations/versions/*.py",

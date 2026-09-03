@@ -16,7 +16,10 @@ compatibility with OpenAI client features this code does not model; only the
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import secrets
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -24,6 +27,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from switchboard import __version__
 from switchboard import metrics as metrics_mod
 from switchboard.cache import ResponseCache, cache_key, is_cacheable
 from switchboard.catalog import ModelCatalog
@@ -121,7 +125,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Switchboard",
     description="Self-hostable AI model router with an auditable savings ledger.",
-    version="0.3.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -130,6 +134,36 @@ app = FastAPI(
 #: That rating is the label the router needs to learn from real traffic -
 #: see switchboard/training.py.
 REQUEST_ID_HEADER = "X-Switchboard-Request-Id"
+
+
+def _dashboard_allowed(request: Request) -> bool:
+    """Is this caller allowed to see the spend page?
+
+    Open when no password is configured, which keeps a laptop install working
+    exactly as before. With one set, HTTP Basic - a browser prompts for it
+    natively, so there is no login page, no cookie and no session store to get
+    wrong.
+
+    The comparison is constant time. A naive `==` returns faster on a wrong
+    first character than on a wrong last one, and that difference is enough to
+    guess a password one character at a time over enough requests.
+    """
+    password = settings.dashboard_password
+    if not password:
+        return True
+
+    scheme, _, encoded = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "basic":
+        return False
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (ValueError, binascii.Error, UnicodeDecodeError):
+        return False
+
+    # Any username is accepted; only the password is checked. Inventing a
+    # username to remember would add a second secret that protects nothing.
+    _, _, supplied = decoded.partition(":")
+    return secrets.compare_digest(supplied, password)
 
 
 # --- Small helpers ---------------------------------------------------------
@@ -308,6 +342,15 @@ async def dashboard(request: Request) -> Response:
     names - never prompt text, never keys. Put it behind your own network
     controls if that is not acceptable in your environment.
     """
+    if not _dashboard_allowed(request):
+        # WWW-Authenticate is what makes the browser show its own password box,
+        # so there is no login page to build or style.
+        return Response(
+            content="Authentication required.",
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Switchboard"'},
+        )
+
     ledger: LedgerService = request.app.state.ledger
     catalog: ModelCatalog = request.app.state.catalog
 
@@ -400,6 +443,7 @@ async def health(request: Request) -> dict[str, Any]:
         "routing": _routing_status(request),
         "shadow_mode": settings.shadow_mode,
         "guardrails": request.app.state.guardrails.describe(),
+        "dashboard_protected": bool(settings.dashboard_password),
         "cache": request.app.state.cache.as_dict(),
         "rate_limit": request.app.state.limiter.snapshot(),
         "circuits": request.app.state.pool.breaker.snapshot(),

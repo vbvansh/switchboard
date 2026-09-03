@@ -143,6 +143,26 @@ class Settings(BaseSettings):
     # request, so a violation is caught immediately rather than at 3am.
     local_only: bool = False
 
+    # --- Dashboard access ---------------------------------------------------
+    # Password for /dashboard. Empty means open, which is the historical
+    # behaviour and right on a laptop.
+    #
+    # SET THIS BEFORE PUTTING SWITCHBOARD ON A PUBLIC URL. The page shows spend
+    # per developer by name. It shows no prompt text and no API keys - that is
+    # deliberate - but "who is spending what" is not something to hand to
+    # anyone who finds the link.
+    #
+    # HTTP Basic, because a browser prompts for it natively and it needs no
+    # login page, no cookies and no session store. Any username is accepted;
+    # only the password is checked. Put it behind HTTPS - Basic sends the
+    # password on every request, and every deployment guide here terminates TLS
+    # in front of the app.
+    #
+    # /metrics is deliberately NOT covered: it carries no prompt text, no keys
+    # and no user names, and a scrape endpoint that needs credentials is one
+    # nobody gets round to configuring.
+    dashboard_password: str = ""
+
     # --- Server -------------------------------------------------------------
     host: str = "127.0.0.1"
     port: int = 8000
