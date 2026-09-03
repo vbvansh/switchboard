@@ -176,23 +176,64 @@ one. If this returns `403 Forbidden`, see
 [When an upload is rejected](#when-an-upload-is-rejected).
 
 Then install it into a **fresh** virtual environment — not the one you develop
-in, which already has every dependency and will hide a missing one:
+in, which already has every dependency and will hide a missing one.
+
+**Install the dependencies from real PyPI first, then this package with
+`--no-deps`.** Do not let TestPyPI resolve dependencies; the reason is below.
 
 ```powershell
 python -m venv C:\Temp\sbtest
 C:\Temp\sbtest\Scripts\Activate.ps1
 
+# 1. Real dependencies, from the real index only
+pip install "fastapi>=0.115" "uvicorn[standard]>=0.32" "pydantic>=2.9" `
+            "pydantic-settings>=2.6" "python-dotenv>=1.0" "httpx>=0.27" `
+            "PyYAML>=6.0" "SQLAlchemy>=2.0" "alembic>=1.14" `
+            "psycopg[binary]>=3.2" "scikit-learn>=1.5" "scipy>=1.14" `
+            "numpy>=1.26" "joblib>=1.4" "typer>=0.15" "rich>=13.9"
+
+# 2. Only this package from TestPyPI, with resolution switched off
+pip install --index-url https://test.pypi.org/simple/ --no-deps switchboard-router
+
+switchboard where
+switchboard router info
+switchboard init
+```
+
+### Why not `--extra-index-url`
+
+The obvious command is this, and it is wrong:
+
+```powershell
+# DO NOT DO THIS
 pip install --index-url https://test.pypi.org/simple/ `
             --extra-index-url https://pypi.org/simple/ `
             switchboard-router
-
-switchboard where
-switchboard init --local-only
-switchboard serve
 ```
 
-The `--extra-index-url` matters: TestPyPI does not mirror real packages, so
-without it every dependency fails to resolve.
+`--extra-index-url` does not mean "fall back to". pip searches **both** indexes
+and picks the best VERSION match, wherever it comes from. TestPyPI is an open
+sandbox full of placeholder packages squatting real names, and one of them is a
+2.5 kB `FASTAPI 1.0`:
+
+```
+Collecting fastapi>=0.115
+  Downloading .../test-files.pythonhosted.org/.../FASTAPI-1.0.tar.gz (2.5 kB)
+  ...
+  FileNotFoundError: [Errno 2] No such file or directory: 'DESCRIPTION.txt'
+```
+
+`1.0` outranks the real FastAPI's `0.115` under Python's version ordering, so
+the junk wins and the install dies inside a stranger's broken `setup.py`.
+
+This is the shape of a **dependency-confusion** attack, and the same reasoning
+applies to any private index: never mix a trusted index with an untrusted one
+and let the resolver choose between them. Install from each explicitly.
+
+**What this means for verification.** TestPyPI can confirm the package builds,
+uploads, installs and runs. It cannot confirm the dependency list resolves,
+because the deps were installed separately. That check only happens for real on
+the first install from PyPI proper — which is the step after this one.
 
 ### 5. Publish for real
 
@@ -308,13 +349,20 @@ python -c "import urllib.request; urllib.request.urlopen('https://pypi.org/pypi/
 
 A `404` means available. Anything else means taken.
 
-### The install from TestPyPI cannot find dependencies
+### The install from TestPyPI pulls a broken dependency
 
-```powershell
-pip install --index-url https://test.pypi.org/simple/ `
-            --extra-index-url https://pypi.org/simple/ `
-            switchboard-router
+Symptoms: pip downloads a suspiciously tiny archive for a well-known package
+and the build dies inside somebody else's `setup.py`.
+
+```
+Collecting fastapi>=0.115
+  Downloading .../test-files.pythonhosted.org/.../FASTAPI-1.0.tar.gz (2.5 kB)
+  FileNotFoundError: [Errno 2] No such file or directory: 'DESCRIPTION.txt'
 ```
 
-`--extra-index-url` is not optional. TestPyPI does not mirror real packages, so
-without it fastapi, sqlalchemy and everything else fail to resolve.
+TestPyPI is an open sandbox full of placeholder packages squatting real names.
+`--extra-index-url` does not mean "fall back to" - pip searches both indexes and
+picks the best VERSION, so a junk `1.0` beats the real `0.115`.
+
+Install the dependencies from real PyPI first, then this package with
+`--no-deps`. The full commands are in step 4 above.
