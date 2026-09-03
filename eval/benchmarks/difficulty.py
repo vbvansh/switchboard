@@ -152,8 +152,30 @@ class Score:
     baseline_mae: float = float("nan")
 
     @property
-    def beats_baseline(self) -> bool:
+    def closer_on_average(self) -> bool:
+        """Lower absolute error than always guessing the mean.
+
+        On its own this proves almost nothing, and the first version of this
+        report treated it as the headline, which was wrong. A model can be
+        closer on average purely because a suite's mean difficulty happens to
+        sit nearer its prediction than the global mean does - while ranking the
+        questions inside that suite completely backwards.
+        """
         return self.mae == self.mae and self.mae < self.baseline_mae
+
+    @property
+    def ranks_correctly(self) -> bool:
+        """Does it actually order questions by hardness?
+
+        THE property routing needs. A router does not care about a question's
+        absolute difficulty score; it cares whether THIS question is harder
+        than THAT one, so it can send the hard ones somewhere better.
+        """
+        return self.spearman == self.spearman and self.spearman > 0.1
+
+    @property
+    def useful(self) -> bool:
+        return self.ranks_correctly and self.closer_on_average
 
     @property
     def improvement_pct(self) -> float:
@@ -204,26 +226,62 @@ class Report:
     by_suite: dict[str, Score] = field(default_factory=dict)
     features: str = ""
 
+    @property
+    def within_suite_spearman(self) -> float:
+        """Median correlation INSIDE each held-out suite.
+
+        This is the number that decides whether a cold-start router is
+        possible, and the first version of this report failed to compute it.
+
+        The overall figure mixes every held-out suite together, so a model that
+        has merely learned "AIME questions are hard, ARC questions are easy"
+        scores well on it - by recognising which suite a question came from,
+        which is a completely different skill from telling one AIME question
+        from another.
+
+        A real user's traffic IS one suite. Telling their workload apart from
+        somebody else's is worth nothing; telling their easy requests from
+        their hard ones is the entire job.
+        """
+        values = [
+            score.spearman
+            for score in self.by_suite.values()
+            if score.spearman == score.spearman
+        ]
+        if not values:
+            return float("nan")
+        return float(np.median(values))
+
     def verdict(self) -> str:
-        """The one-line answer to "should we build the cold-start router?"."""
-        if not self.overall.beats_baseline:
+        """Should a cold-start router be built on this?
+
+        Judged on WITHIN-suite ranking, not on the overall figure. The overall
+        figure rewards recognising which suite a question came from, and a real
+        user only ever has one.
+        """
+        within = self.within_suite_spearman
+        if within != within:
+            return "NOT SCORABLE. No held-out suite had enough variety to score."
+
+        if within < 0.10:
             return (
-                "NO SIGNAL. Predicted difficulty is no better than guessing the "
-                "average on suites it has not seen. A shipped prior built this "
-                "way would not work; the approach needs rethinking before "
-                "anything is built on it."
+                f"NO USABLE SIGNAL. Within a suite the ranking correlation is "
+                f"{within:.3f} - effectively zero. The overall figure of "
+                f"{self.overall.spearman:.3f} comes from telling SUITES apart, "
+                "not questions. A real user's traffic is one suite, so that "
+                "skill is worth nothing to them. Do not build a shipped prior "
+                "on this."
             )
-        if self.overall.spearman >= 0.45:
+        if within >= 0.35:
             return (
-                "TRANSFERS. Difficulty predicted from text alone ranks unseen "
-                "suites well. A shipped prior is worth building, and these "
-                "numbers are what it should be measured against."
+                f"TRANSFERS. Within-suite correlation {within:.3f} on suites "
+                "never seen. A shipped prior is worth building, and this is the "
+                "number it must beat."
             )
         return (
-            "WEAK BUT REAL. Better than guessing, not by much. Worth building "
-            "only WITH a confidence estimate, so the router can fall back to a "
-            "tier policy on prompts it cannot read - see the per-length table "
-            "for where it holds up."
+            f"WEAK. Within-suite correlation {within:.3f}. Real but small - "
+            "worth building only WITH a confidence estimate, so the router can "
+            "fall back to a tier policy on prompts it cannot read."
         )
 
 

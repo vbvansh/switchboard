@@ -156,6 +156,8 @@ FAILOVERS = "switchboard_failovers_total"
 RATE_LIMITED = "switchboard_rate_limited_total"
 POLICY_EVENTS = "switchboard_policy_events_total"
 FEEDBACK = "switchboard_feedback_total"
+VERIFICATION = "switchboard_verification_total"
+ESCALATIONS = "switchboard_escalations_total"
 TOKENS = "switchboard_tokens_total"
 COST = "switchboard_simulated_cost_usd_total"
 
@@ -177,6 +179,16 @@ def build_registry() -> Metrics:
         FEEDBACK,
         "Answer ratings from applications, by verdict and model. This is "
         "the training signal for a live-trained router.",
+    )
+    metrics.describe(
+        VERIFICATION,
+        "Answers checked for obvious failure, by what fired. The share "
+        "that is not \"clean\" is the escalation rate you would pay for.",
+    )
+    metrics.describe(
+        ESCALATIONS,
+        "Requests retried on a stronger model. Each one made TWO provider "
+        "calls and was charged for both.",
     )
     metrics.describe(TOKENS, "Tokens processed, by direction.")
     metrics.describe(COST, "Simulated spend. NOT real money - see the README.")

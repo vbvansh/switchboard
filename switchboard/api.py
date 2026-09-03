@@ -57,12 +57,14 @@ from switchboard.providers.breaker import CircuitBreaker
 from switchboard.providers.retry import RetryPolicy
 from switchboard.ratelimit import RateLimiter
 from switchboard.routing.base import RoutingContext
+from switchboard.routing.ladder import build_ladder
 from switchboard.routing.live import RequestLimits, build_router
 from switchboard.schema import require_up_to_date
 from switchboard.shadow import estimate_cost, summarise
 from switchboard.site import SiteContext
 from switchboard.site import render as render_site
 from switchboard.streaming import UsageSniffer, request_usage_in_stream
+from switchboard.verification import inspect as inspect_answer
 
 
 @asynccontextmanager
@@ -105,6 +107,9 @@ async def lifespan(app: FastAPI):
     app.state.guardrails = build_guardrails(
         settings.guardrails_mode, settings.guardrails_file
     )
+    # The fallback that needs no training at all. Used when there is no
+    # trained router, which is every fresh install - see routing/ladder.py.
+    app.state.ladder = build_ladder(catalog, pool.available_models())
     app.state.metrics = metrics_mod.build_registry()
     try:
         yield
@@ -168,9 +173,21 @@ def _resolve_model(
     if router is None or not router.enabled:
         if explicit:
             return str(requested), None, None
+
+        # No trained router. Rather than sending everything to one hardcoded
+        # default, use the ladder policy: cheapest model that physically fits.
+        # It guesses nothing - quality is checked after the answer arrives.
+        ladder = getattr(request.app.state, "ladder", None)
+        if ladder is not None:
+            decision = ladder.choose(
+                RoutingContext(messages=payload.get("messages") or []),
+                RequestLimits.from_headers(request.headers),
+            )
+            return decision.model, decision.reason, None
+
         return (
             settings.default_model,
-            "routing unavailable; used default_model",
+            "routing unavailable and no ladder; used default_model",
             None,
         )
 
@@ -686,6 +703,48 @@ async def chat_completions(request: Request) -> Response:
             503, failure or "no provider answered", "provider_unavailable"
         )
 
+    # Look at what came back. Two experiments showed a prompt cannot be
+    # judged before it is answered, so the judgement happens here instead -
+    # mechanically, on the answer, at no cost. See switchboard/verification.py.
+    verification: str | None = None
+    escalated_from: str | None = None
+    attempts = 1
+    extra_cost = 0.0
+
+    if settings.verify_mode != "off" and upstream.status_code < 400:
+        try:
+            body_json = json.loads(upstream.content)
+        except ValueError:
+            body_json = None
+        found = inspect_answer(body_json, payload)
+        verification = found.names
+        metrics.increment(
+            metrics_mod.VERIFICATION,
+            outcome=found.names or "clean",
+        )
+
+        if (
+            found.should_escalate
+            and settings.verify_mode == "escalate"
+            and settings.max_escalations > 0
+        ):
+            upstream, escalated_from, extra_cost = await _escalate(
+                request=request,
+                payload=payload,
+                first=upstream,
+                first_model=served_model,
+                pool=pool,
+                metrics=metrics,
+            )
+            if escalated_from is not None:
+                attempts = 2
+                served_model = str(payload["model"])
+                routing_reason = (
+                    f"{routing_reason or 'escalated'}; answer failed "
+                    f"[{found.names}] on {escalated_from}, retried on "
+                    f"{served_model}"
+                )
+
     latency_ms = int((time.perf_counter() - started) * 1000)
     usage = _usage_from_body(upstream.content)
     if usage is not None:
@@ -711,6 +770,11 @@ async def chat_completions(request: Request) -> Response:
         **shadow_fields(prompt_tokens, completion_tokens),
         **policy_fields,
         public_id=public_id,
+        verification=verification,
+        escalated_from=escalated_from,
+        attempts=attempts,
+        # The honest bit: an escalated request paid for BOTH calls.
+        extra_cost_usd=extra_cost,
     )
 
     metrics.increment(
@@ -743,6 +807,71 @@ async def chat_completions(request: Request) -> Response:
             **request_headers,
         },
     )
+
+
+async def _escalate(
+    *,
+    request: Request,
+    payload: dict[str, Any],
+    first,
+    first_model: str,
+    pool: ProviderPool,
+    metrics,
+):
+    """Retry one rejected answer on the next model up the ladder.
+
+    Returns (response, model_that_failed, cost_of_the_failed_call). When
+    escalation is not possible the original response comes back untouched with
+    a None model, so the caller has one path rather than two.
+
+    THREE THINGS IT REFUSES TO DO.
+
+    It will not escalate past one rung at a time. Jumping straight to the most
+    expensive model turns every detected failure into the largest possible
+    bill, and the benchmarks showed the savings live in the spread between
+    cheap models, not at the top.
+
+    It will not escalate when there is nothing above the current model. That is
+    a normal outcome, not an error: the answer is returned as it is, with the
+    verification result recorded so the operator can see it happened.
+
+    It will not throw away the first answer's cost. The failed call was made
+    and it was billed, so its cost is returned here and added to the row. This
+    is the accounting rule the cascade experiments were built around, and
+    dropping it is the easiest way to make escalation look free.
+    """
+    ladder = getattr(request.app.state, "ladder", None)
+    if ladder is None:
+        return first, None, 0.0
+
+    stronger = ladder.next_model(first_model)
+    if stronger is None:
+        return first, None, 0.0
+
+    candidates = pool.providers_for(stronger)
+    if not candidates:
+        return first, None, 0.0
+
+    catalog: ModelCatalog = request.app.state.catalog
+    failed_usage = _usage_from_body(first.content) or (0, 0)
+    failed_cost = catalog.cost(first_model, failed_usage[0], failed_usage[1])
+
+    retried = dict(payload)
+    retried["model"] = stronger
+    second, _, failure = await _call_with_failover(
+        candidates, retried, pool, metrics
+    )
+
+    if second is None or second.status_code >= 400:
+        # The stronger model failed too. Keep the FIRST answer: it was at least
+        # a response, and returning an error instead would turn a mediocre
+        # answer into no answer at all.
+        metrics.increment(metrics_mod.ESCALATIONS, outcome="failed")
+        return first, None, 0.0
+
+    metrics.increment(metrics_mod.ESCALATIONS, outcome="ok", to=stronger)
+    payload["model"] = stronger
+    return second, first_model, failed_cost
 
 
 async def _call_with_failover(candidates, payload, pool, metrics):

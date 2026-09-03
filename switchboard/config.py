@@ -85,6 +85,28 @@ class Settings(BaseSettings):
     # a policy an operator thinks is running must never be silently off.
     guardrails_file: str | None = None
 
+    # --- Verification and escalation ---------------------------------------
+    # Look at each answer and decide whether it obviously failed.
+    #
+    #   "off"       do nothing
+    #   "flag"      check every answer, record what fired, change nothing
+    #   "escalate"  additionally retry on a stronger model - but ONLY for the
+    #               checks where a retry would actually help
+    #
+    # DEFAULT IS "flag", and the reason is the same one that keeps blocking off
+    # in the usage policy: escalation makes a second provider call, which
+    # doubles the cost of the requests it touches. Nobody should acquire a
+    # larger bill by installing software and leaving the defaults alone. Run in
+    # flag mode first, look at how often checks fire on YOUR traffic, then
+    # decide. See switchboard/verification.py.
+    verify_mode: str = "flag"
+
+    # How many times one request may be retried on a stronger model. One is
+    # almost always right: if the cheap model returned nothing and the next one
+    # up also returned nothing, a third call is unlikely to help and certain to
+    # cost.
+    max_escalations: int = 1
+
     # --- Rate limiting ------------------------------------------------------
     # Requests per minute per user. A monthly budget does not stop someone
     # spending it in ninety seconds; this does. Set to 0 to disable.

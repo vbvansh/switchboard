@@ -1216,49 +1216,74 @@ def bench_difficulty(
         f"{overall.baseline_mae:.3f}",
         "the bar to beat",
     )
-    colour = "green" if overall.beats_baseline else "red"
+    colour = "green" if overall.closer_on_average else "red"
     headline.add_row(
         "Improvement over guessing",
         f"[{colour}]{overall.improvement_pct:+.1f}%[/{colour}]",
         "negative means worse than doing nothing",
     )
+    within = report.within_suite_spearman
+    within_colour = "green" if within >= 0.35 else "yellow" if within >= 0.1 else "red"
+    headline.add_row(
+        "[bold]WITHIN-suite correlation[/bold]",
+        f"[{within_colour}]{within:.3f}[/{within_colour}]",
+        "the one that decides it - see below",
+    )
     console.print(headline)
+    console.print(
+        "[dim]The overall figure mixes every held-out suite together, so it "
+        "rewards recognising WHICH suite a question came from. A real user's "
+        "traffic is one suite, so that skill is worth nothing to them. The "
+        "within-suite number is what routing actually needs.[/dim]"
+    )
 
     if report.by_length:
         lengths = Table(title="By prompt length - where does it hold up?")
         lengths.add_column("Length")
         lengths.add_column("Questions", justify="right")
-        lengths.add_column("Correlation", justify="right")
-        lengths.add_column("Beats guessing?")
+        lengths.add_column("Ranks correctly?", justify="right")
+        lengths.add_column("Closer on average?", justify="right")
         for name, score in report.by_length.items():
-            mark = (
-                f"[green]yes, {score.improvement_pct:+.0f}%[/green]"
-                if score.beats_baseline
-                else "[red]no[/red]"
+            ranks = (
+                f"[green]{score.spearman:.3f}[/green]"
+                if score.ranks_correctly
+                else f"[red]{score.spearman:.3f}[/red]"
             )
-            lengths.add_row(name, f"{score.n:,}", f"{score.spearman:.3f}", mark)
+            closer = (
+                f"[dim]{score.improvement_pct:+.0f}%[/dim]"
+                if score.closer_on_average
+                else "[dim]no[/dim]"
+            )
+            lengths.add_row(name, f"{score.n:,}", ranks, closer)
         console.print(lengths)
         console.print(
-            "[dim]This is the table that answers 'does it work on short "
-            "prompts as well as long ones'. A weak row is not a failure - it "
-            "is where the router should say it does not know.[/dim]"
+            "[dim]'Ranks correctly' is the column that matters: can it tell a "
+            "hard question from an easy one. 'Closer on average' can be "
+            "positive while the ranking is backwards - that just means this "
+            "slice's average difficulty happened to sit near the prediction, "
+            "which is not a skill a router can use.[/dim]"
         )
 
     if report.by_suite:
         suites = Table(title="By held-out suite")
         suites.add_column("Suite")
         suites.add_column("Questions", justify="right")
-        suites.add_column("Correlation", justify="right")
-        suites.add_column("Beats guessing?")
+        suites.add_column("Ranks correctly?", justify="right")
+        suites.add_column("Closer on average?", justify="right")
         for name, score in sorted(
             report.by_suite.items(), key=lambda kv: -(kv[1].spearman or 0)
         ):
-            mark = (
-                f"[green]yes, {score.improvement_pct:+.0f}%[/green]"
-                if score.beats_baseline
-                else "[red]no[/red]"
+            ranks = (
+                f"[green]{score.spearman:.3f}[/green]"
+                if score.ranks_correctly
+                else f"[red]{score.spearman:.3f}[/red]"
             )
-            suites.add_row(name, f"{score.n:,}", f"{score.spearman:.3f}", mark)
+            closer = (
+                f"[dim]{score.improvement_pct:+.0f}%[/dim]"
+                if score.closer_on_average
+                else "[dim]no[/dim]"
+            )
+            suites.add_row(name, f"{score.n:,}", ranks, closer)
         console.print(suites)
 
     console.print(f"\n[bold]{report.verdict()}[/bold]")

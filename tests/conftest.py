@@ -51,6 +51,12 @@ class StubProvider:
         self.prompt_tokens = 1000
         self.completion_tokens = 500
         self.include_usage = True
+        # What the fake model "says". Settable so verification tests can make
+        # it return an empty answer, a refusal, or prose where JSON was asked
+        # for - without needing a real model that misbehaves on cue.
+        self.content = "hi"
+        self.finish_reason = "stop"
+        self.calls = 0
 
     async def aclose(self) -> None:
         pass
@@ -67,11 +73,17 @@ class StubProvider:
 
     async def chat_completion(self, payload: dict) -> httpx.Response:
         self.last_payload = payload
+        self.calls += 1
         if not self.healthy:
             raise ProviderUnavailable("stub is down")
         body: dict = {
             "id": "chatcmpl-stub",
-            "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": self.content},
+                    "finish_reason": self.finish_reason,
+                }
+            ],
         }
         if self.include_usage:
             body["usage"] = self._usage()
@@ -152,6 +164,7 @@ def client(
     from switchboard.guardrails import MODE_OFF, Guardrails
     from switchboard.metrics import build_registry
     from switchboard.ratelimit import RateLimiter
+    from switchboard.routing.ladder import build_ladder
 
     api.app.state.pool = pool
     api.app.state.catalog = prices
@@ -167,6 +180,9 @@ def client(
     # outcome of a test about something else. tests/test_guardrails.py turns it
     # on deliberately.
     api.app.state.guardrails = Guardrails(mode=MODE_OFF)
+    # The untrained fallback. Present by default so tests exercise the
+    # same path a fresh install takes.
+    api.app.state.ladder = build_ladder(prices, prices.known_models())
     api.app.state.database = database
     api.app.state.ledger = ledger
     return TestClient(api.app)

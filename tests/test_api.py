@@ -79,17 +79,34 @@ def test_models_endpoint_requires_a_key(client: TestClient, auth: dict) -> None:
 # --- Model selection -------------------------------------------------------
 
 
-def test_auto_resolves_to_the_default_model(
-    client: TestClient, auth: dict, provider
+def test_auto_uses_the_ladder_when_there_is_no_trained_router(
+    client: TestClient, auth: dict, provider, prices
 ) -> None:
+    """`auto` used to mean "the one model somebody put in a config file".
+
+    It now means the cheapest model that physically fits, chosen by the
+    untrained ladder policy - which is what makes a fresh install route
+    sensibly on its very first request instead of sending everything to one
+    hardcoded default.
+    """
     client.post("/v1/chat/completions", json=_chat("auto"), headers=auth)
-    assert provider.last_payload["model"] == settings.default_model
+    assert provider.last_payload["model"] == prices.ladder[0]
 
 
-def test_missing_model_resolves_to_the_default(
-    client: TestClient, auth: dict, provider
+def test_missing_model_also_uses_the_ladder(
+    client: TestClient, auth: dict, provider, prices
 ) -> None:
     client.post("/v1/chat/completions", json=_chat(None), headers=auth)
+    assert provider.last_payload["model"] == prices.ladder[0]
+
+
+def test_without_a_ladder_it_still_falls_back_to_the_default(
+    client: TestClient, auth: dict, provider
+) -> None:
+    """One model configured, or none on the ladder: routing has no choice to
+    make, and the request must still be served rather than refused."""
+    client.app.state.ladder = None
+    client.post("/v1/chat/completions", json=_chat("auto"), headers=auth)
     assert provider.last_payload["model"] == settings.default_model
 
 
@@ -135,7 +152,8 @@ def test_recorded_row_captures_the_details(
         row = session.scalar(select(RequestLog))
 
     assert row.requested_model == "auto"
-    assert row.served_model == settings.default_model
+    # The ladder chose it, not default_model - see the ladder tests above.
+    assert row.served_model
     assert (row.prompt_tokens, row.completion_tokens) == (1000, 500)
     assert row.tokens_estimated is False
     assert row.status == "ok"

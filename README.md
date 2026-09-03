@@ -36,6 +36,7 @@ subject to per-request latency, cost and quality limits. What works today:
 - Native Anthropic and Gemini adapters, plus model discovery from any provider
 - A public landing page served by the app itself, deployable in one step
 - Train the router on YOUR traffic, from ratings your application sends back
+- Routing that works on the first request, with no training at all
 
 | Phase | | |
 |---|---|---|
@@ -49,6 +50,7 @@ subject to per-request latency, cost and quality limits. What works today:
 | H | Public landing page and one-step deployment | done |
 | I | Feedback endpoint and training on your own traffic | done |
 | J.1 | Installable as a package, with files in the right places | done |
+| J.2 | Cold start: ladder routing + answer verification, no training | done |
 
 **Documentation:** [Architecture](docs/ARCHITECTURE.md) - how it is put
 together and what happens to one request. [Results](docs/RESULTS.md) -
@@ -1028,6 +1030,84 @@ trained router was running without routing and had no way to find out.
 The classes now live in `switchboard/routing/`, the artifact version went from
 1 to 2 so an old file says "retrain it" rather than failing mysteriously, and a
 test asserts that everything a trained artifact refers to ships with the server.
+
+## Routing on day one, with no training
+
+A fresh install has no traffic, no ratings and no trained router. Something
+still has to choose a model for the very first request.
+
+```powershell
+# nothing to train, nothing to configure
+python -m switchboard serve
+```
+
+Two mechanisms, neither of which predicts anything:
+
+### 1. The ladder — cheapest model that fits
+
+Not a heuristic. It applies only facts:
+
+- the cheapest model on your `ladder`, always
+- unless the prompt does not fit its context window — a hard limit, not an opinion
+- unless the caller sent a cost or latency cap, which is their decision, not a guess
+
+**It deliberately does not guess from wording.** This project measured that: a
+hand-written keyword heuristic scored 77.8% on one benchmark and **57.9% on
+another — worse than simply always using the cheapest model.** A rule that helps
+on one workload and hurts on another is worse than no rule.
+
+Two further experiments confirmed nothing better is available before the answer
+exists. Predicting a question's difficulty from its text does not transfer
+between domains: within a suite the correlation was **0.077**, which is zero.
+See [RESULTS.md section 8](docs/RESULTS.md).
+
+### 2. Verification — look at what came back
+
+Guessing needs knowledge of the world. Checking needs only the answer, which is
+sitting right there:
+
+| Check | Escalates? | Why |
+|---|---|---|
+| empty response | **yes** | another model may well produce content |
+| invalid JSON when JSON was requested | **yes** | stronger models follow formats better |
+| truncated at `max_tokens` | no | a stronger model hits the same limit — raise `max_tokens` |
+| the model refused | **never** | see below |
+| hedging, "I'm not sure" | no | that may be the correct answer |
+
+```
+SWITCHBOARD_VERIFY_MODE=off        do nothing
+SWITCHBOARD_VERIFY_MODE=flag       check and record, change nothing   (DEFAULT)
+SWITCHBOARD_VERIFY_MODE=escalate   also retry on the next model up
+```
+
+**Why `flag` is the default.** Escalation makes a second provider call, which
+doubles the cost of the requests it touches. Nobody should acquire a larger bill
+by installing software and leaving the defaults alone. Run in `flag` mode first,
+look at how often checks fire on your own traffic, then decide — the same
+argument that keeps blocking off in the usage policy.
+
+### A refusal is never escalated
+
+If a model declines a request, sending it up the ladder until one complies is
+**shopping for a yes.** Switchboard records the refusal and passes it through.
+There is a test named after this.
+
+### Escalated requests are charged for both calls
+
+A request that escalated made two provider calls and paid for both.
+`simulated_cost_usd` holds the sum and `attempts` says how many calls it took.
+
+Charging only for the model that produced the final answer would make this
+feature look free, and it is exactly the error the cascade scoring was built to
+avoid.
+
+### What it costs
+
+Every request starts at the cheapest model. On the benchmarks, always-cheapest
+scored **84.0% against 86.8%** for always using the best model, at **1/20th of
+the price** — before any escalation. Escalation recovers some of that gap on the
+requests where failure is visible. It cannot recover the rest, and nothing here
+pretends otherwise.
 
 ## Licence
 

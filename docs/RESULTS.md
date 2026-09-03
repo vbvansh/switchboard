@@ -232,6 +232,66 @@ raise it.
 
 ---
 
+## 8. A negative result: difficulty does not transfer across domains
+
+The idea being tested: difficulty is a property of the QUESTION, not of any
+model, so it could be measured once on public data and shipped inside the
+package — giving every user a working router on install, with no traffic and no
+training. That would remove the cold start entirely.
+
+**It does not work, and the reason is specific.**
+
+```powershell
+python -m switchboard bench difficulty all --holdout 8
+```
+
+35,420 questions across 40 suites. Difficulty is the fraction of models that
+got a question wrong. Eight whole suites were held back — not a random sample of
+questions, because a model that has seen GPQA can pattern-match GPQA.
+
+| Measure | Value |
+|---|---|
+| Correlation across all held-out suites mixed | 0.309 |
+| **Correlation WITHIN each held-out suite (median)** | **0.023** |
+| Absolute error vs always guessing the mean | −1.1% (worse) |
+
+Per held-out suite, the within-suite correlation:
+
+| Suite | Questions | Correlation |
+|---|---|---|
+| xroutebench/math | 950 | 0.337 |
+| llmrouterbench/swe-bench | 500 | 0.200 |
+| llmrouterbench/simpleqa | 4,826 | 0.053 |
+| llmrouterbench/arcc | 1,172 | 0.042 |
+| llmrouterbench/arenahard_coding | 253 | 0.005 |
+| llmrouterbench/arenahard | 750 | 0.005 |
+| xroutebench/aime_2020_2024 | 120 | 0.002 |
+| llmrouterbench/hle | 2,658 | −0.001 |
+
+**What went wrong.** The overall figure of 0.309 looks like a weak but real
+signal. It is not. Mixing every held-out suite together rewards a model for
+recognising *which suite* a question came from — AIME questions are hard, ARC
+questions are easy — which is vocabulary matching, not difficulty estimation.
+Inside any single suite the correlation is 0.023: no ability to tell one
+question from another.
+
+**Why that kills the idea.** A real user's traffic is one "suite" — their own
+workload. Distinguishing their requests from somebody else's is worth nothing.
+Distinguishing their easy requests from their hard ones is the entire job, and
+that is exactly the part that scores zero.
+
+**A reporting bug this exposed.** The first version of this report judged
+success on absolute error against a constant baseline, and printed rows like
+"correlation −0.048, beats guessing +25%". Both numbers were correct and the
+conclusion drawn from them was not: a model can sit closer to a suite's average
+while ranking every question inside it backwards. The report now measures
+within-suite ranking and says so.
+
+**What this saved.** Roughly six phases of work building a shipped prior on a
+foundation that does not hold. The experiment took an afternoon.
+
+---
+
 ## What was NOT measured
 
 Stated plainly, because a results document that only lists wins is marketing.
@@ -248,6 +308,9 @@ Stated plainly, because a results document that only lists wins is marketing.
 - **No human evaluation.** Correctness comes from the benchmark answer keys.
   There is no LLM judge anywhere in this project, deliberately: grading with a
   model would make the results depend on a model.
+- **Difficulty estimated from prompt text alone.** Section 8 measured it and
+  it does not transfer between domains. The cold-start prior that would have
+  been built on it is not being built.
 - **No router has yet been trained on real traffic.** The pipeline is built,
   gated and tested end to end, but every routing number in this document still
   comes from public benchmarks. Whether training on live traffic actually fixes

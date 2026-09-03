@@ -123,11 +123,17 @@ def test_errors_are_never_cached() -> None:
 
 
 def test_entries_expire() -> None:
-    """A three-week-old answer may not be what that model says today."""
+    """A three-week-old answer may not be what that model says today.
+
+    The margin between the TTL and the sleep is deliberately wide. An earlier
+    version used 0.05s and 0.06s, and failed intermittently when the rest of
+    the suite was competing for the CPU - a test that fails one run in twenty
+    is a test people learn to ignore.
+    """
     cache = ResponseCache(ttl_s=0.05)
     cache.put("k", b"x", 200)
     assert cache.get("k") is not None
-    time.sleep(0.06)
+    time.sleep(0.25)
     assert cache.get("k") is None
     assert cache.stats.expirations == 1
 

@@ -143,6 +143,21 @@ class RequestLog(Base):
     guardrail_action: Mapped[str | None] = mapped_column(String(16), nullable=True)
     guardrail_rules: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # --- Verification and escalation ---------------------------------------
+    # Which mechanical checks fired on the answer, comma separated. NULL means
+    # verification was off; "" means it ran and found nothing. Those are
+    # different facts and a report must be able to tell them apart.
+    verification: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Set when an answer failed a check and was retried on a stronger model.
+    escalated_from: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # Provider calls made for this one request. THE HONEST COLUMN: an escalated
+    # request paid for both calls, and simulated_cost_usd holds the sum.
+    # Charging only for the model that produced the final answer is the easiest
+    # way to make escalation look cheaper than it is.
+    attempts: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+
     # --- Was the answer any good? ------------------------------------------
     # "good" | "bad", sent by the application through POST /v1/feedback.
     #
