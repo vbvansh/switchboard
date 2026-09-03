@@ -23,6 +23,32 @@ It routes on the **first request**. Nothing to train, nothing to wait for.
 
 ---
 
+## Status: v1
+
+**This is version 1 — complete, tested and usable today.** Everything described
+below works now, and every number quoted is reproducible with a command in this
+repository.
+
+**Version 2 is on the way.** What it's likely to bring:
+
+- **Automatic retraining** — retrain from your own feedback on a schedule,
+  shadow-test the new router against the current one, and only promote it if it
+  measurably wins
+- **Live verification of the Anthropic and Gemini adapters** — both are written
+  to the published specifications and tested against recorded responses, but
+  only the OpenAI-compatible adapter has been run against a real API so far
+- **Tool-call translation for Claude and Gemini** — chat and streaming work
+  today; tool calling currently goes through OpenRouter
+- **Wider model coverage in the shipped router** — the current one is strong on
+  open-weight models and thin on commercial ones
+- **AWS Bedrock and Google Vertex adapters**
+
+Nothing above is required to use v1. See
+[What it does *not* do](#what-it-does-not-do) for the current limits, measured
+rather than guessed.
+
+---
+
 ## The problem
 
 Models differ in price by a factor of two hundred. Most questions don't need the
